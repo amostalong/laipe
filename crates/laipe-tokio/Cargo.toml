@@ -1,0 +1,24 @@
+[package]
+name = "laipe-tokio"
+description = "Optional tokio-side convenience wrapper (cancel-handle, channel helpers) for the laipe agent framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+laipe-core = { path = "../laipe-core" }
+laipe-streaming = { path = "../laipe-streaming" }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

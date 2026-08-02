@@ -1,0 +1,24 @@
+# Build artifacts
+/target/
+**/target/
+
+# Cargo lock — keep this committed for libraries; uncomment the next line to ignore it
+# Cargo.lock
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS
+*.log
+*.tmp
+*.bak
+
+# Local config / secrets
+.env
+.env.local
+*.local

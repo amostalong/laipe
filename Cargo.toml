@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/laipe-core",
+    "crates/laipe-streaming",
+    "crates/laipe-tokio",
+    "examples/vanilla-rust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT"
+repository = "https://github.com/amostalong/laipe"
+homepage = "https://github.com/amostalong/laipe"
+authors = ["amostalong"]
+keywords = ["llm", "ai", "agent", "streaming", "openai", "anthropic"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[workspace.dependencies]
+# Core async runtime
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Streaming utilities
+bytes = "1.7"
+pin-project-lite = "0.2"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# lints (stable subset)
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+# TODO: v1.0 之前 all public types 加 doc, 改回 "warn"
+missing_docs = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Allow some common-acceptable patterns
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
