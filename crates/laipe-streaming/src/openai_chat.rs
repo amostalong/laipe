@@ -25,9 +25,13 @@ use laipe_core::tool::{ToolCallPartial, ToolDefinition};
 use laipe_core::types::{ChatMessage, ChatRole, ProviderConfig, StreamEvent};
 use reqwest::Client;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::recorder::{
+    redact_request_bytes, CompletionOutcome, DiagnosticRecorder, RecordingContext,
+};
 use crate::sse::{SseFrame, SseParser};
 use crate::StreamChat;
 use crate::{StreamError, StreamResult};
@@ -47,14 +51,20 @@ impl StreamChat for OpenAiChatStreamer {
         cfg: &ProviderConfig,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
+        recorder: Arc<dyn DiagnosticRecorder>,
+        ctx: &RecordingContext,
     ) -> StreamResult<mpsc::Receiver<StreamEvent>> {
-        let api_url = format!(
-            "{}/chat/completions",
-            cfg.endpoint.trim_end_matches('/'),
-        );
+        let api_url = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'),);
         let body = build_request_body(&cfg.model, messages, tools);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| StreamError::Other(format!("request serialization: {e}")))?;
+
+        // Hand the **redacted** request body to the recorder. The streaming
+        // layer is the boundary that knows the exact bytes the wire will see
+        // (auth header, JSON encoding quirks), so it owns redaction.
+        recorder
+            .record_request(ctx, &redact_request_bytes(&body_bytes))
+            .await;
 
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -70,15 +80,57 @@ impl StreamChat for OpenAiChatStreamer {
             req = req.header("Authorization", format!("Bearer {}", cfg.api_key));
         }
 
-        let resp = req.send().await.map_err(map_reqwest_error)?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                // Pre-stream failure: classify and tell the recorder
+                // the round is over with no chunks ever observed.
+                let kind = classify_reqwest_error_text(&e.to_string());
+                recorder
+                    .record_completion(
+                        ctx,
+                        &CompletionOutcome::PreStreamFailure {
+                            kind,
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                return Err(map_reqwest_error(e));
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            let kind = match status.as_u16() {
+                401 | 403 => ChatErrorKind::Auth,
+                404 => ChatErrorKind::ModelNotFound,
+                429 => ChatErrorKind::RateLimit,
+                500..=599 => ChatErrorKind::ServerError,
+                400..=499 => ChatErrorKind::BadRequest,
+                _ => ChatErrorKind::Unknown,
+            };
+            recorder
+                .record_completion(
+                    ctx,
+                    &CompletionOutcome::PreStreamFailure {
+                        kind,
+                        message: format!("upstream returned {}: {}", status.as_u16(), body),
+                    },
+                )
+                .await;
             return Err(classify_upstream_error(status.as_u16(), &body));
         }
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let mut byte_stream = resp.bytes_stream();
+
+        // Clone the ctx + recorder for the spawned drain task. The
+        // trait object is `Send + Sync` so this is safe across the
+        // await boundary.
+        let recorder_task = recorder.clone();
+        let ctx_task = ctx.clone();
+        let mut text_events: u32 = 0;
+        let mut tool_events: u32 = 0;
 
         tokio::spawn(async move {
             let mut sse = SseParser::new();
@@ -88,41 +140,99 @@ impl StreamChat for OpenAiChatStreamer {
                     Ok(b) => b,
                     Err(e) => {
                         let kind = classify_reqwest_error_text(&e.to_string());
+                        let message = format!("stream read error: {e}");
                         let _ = tx
                             .send(StreamEvent::Error {
                                 kind,
-                                message: format!("stream read error: {e}"),
+                                message: message.clone(),
                             })
+                            .await;
+                        recorder_task
+                            .record_completion(
+                                &ctx_task,
+                                &CompletionOutcome::Error { kind, message },
+                            )
                             .await;
                         break;
                     }
                 };
+                recorder_task.record_response_chunk(&ctx_task, &bytes).await;
                 for frame in sse.feed(&bytes) {
                     let item = match frame {
                         SseFrame::Data(json) => match parse_openai_chunk(&json) {
-                            Ok(Some(parsed)) => parsed,
+                            Ok(Some(parsed @ StreamEvent::Text(_))) => {
+                                text_events += 1;
+                                parsed
+                            }
+                            Ok(Some(parsed @ StreamEvent::ToolCalls(_))) => {
+                                tool_events += 1;
+                                parsed
+                            }
+                            Ok(Some(other)) => other,
                             Ok(None) => continue,
                             Err(e) => {
+                                let message = format!("parse error: {e}");
                                 let _ = tx
                                     .send(StreamEvent::Error {
                                         kind: ChatErrorKind::StreamProtocol,
-                                        message: format!("parse error: {e}"),
+                                        message: message.clone(),
                                     })
+                                    .await;
+                                recorder_task
+                                    .record_completion(
+                                        &ctx_task,
+                                        &CompletionOutcome::Error {
+                                            kind: ChatErrorKind::StreamProtocol,
+                                            message,
+                                        },
+                                    )
                                     .await;
                                 return;
                             }
                         },
                         SseFrame::Done => {
                             let _ = tx.send(StreamEvent::Done).await;
+                            recorder_task
+                                .record_completion(
+                                    &ctx_task,
+                                    &CompletionOutcome::Done {
+                                        text_events,
+                                        tool_call_events: tool_events,
+                                    },
+                                )
+                                .await;
                             return;
                         }
                         SseFrame::Skip | SseFrame::Named { .. } => continue,
                     };
                     if tx.send(item).await.is_err() {
-                        return; // consumer dropped
+                        // Consumer dropped. We still need to flush the
+                        // recording so the on-disk artifact is closed.
+                        recorder_task
+                            .record_completion(&ctx_task, &CompletionOutcome::Cancelled)
+                            .await;
+                        return;
                     }
                 }
             }
+            // Stream ended without a [DONE] marker. The upstream closed
+            // the connection; we surface that to the consumer and close
+            // the recording.
+            let _ = tx
+                .send(StreamEvent::Error {
+                    kind: ChatErrorKind::StreamProtocol,
+                    message: "upstream closed stream without [DONE]".to_string(),
+                })
+                .await;
+            recorder_task
+                .record_completion(
+                    &ctx_task,
+                    &CompletionOutcome::Error {
+                        kind: ChatErrorKind::StreamProtocol,
+                        message: "upstream closed stream without [DONE]".to_string(),
+                    },
+                )
+                .await;
         });
 
         Ok(rx)
@@ -251,9 +361,11 @@ fn map_reqwest_error(e: reqwest::Error) -> StreamError {
 }
 
 fn classify_reqwest_error_text(text: &str) -> ChatErrorKind {
-    if text.contains("connect") || text.contains("TLS") || text.contains("handshake") {
-        ChatErrorKind::Network
-    } else if text.contains("timeout") {
+    if text.contains("connect")
+        || text.contains("TLS")
+        || text.contains("handshake")
+        || text.contains("timeout")
+    {
         ChatErrorKind::Network
     } else {
         ChatErrorKind::Unknown

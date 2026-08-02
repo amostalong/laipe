@@ -8,10 +8,12 @@
 
 #![doc(html_root_url = "https://docs.rs/laipe-core/0.1.0")]
 
+pub mod diagnostics;
 pub mod error;
 pub mod tool;
 pub mod types;
 
+pub use diagnostics::ErrorContext;
 pub use error::{ChatErrorDiag, ChatErrorKind};
 pub use tool::{ToolCallInfo, ToolCallPartial, ToolDefinition, ToolResult};
 pub use types::{

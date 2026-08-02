@@ -13,9 +13,13 @@ use laipe_core::types::{ChatMessage, ChatRole, ProviderConfig, StreamEvent};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::recorder::{
+    redact_request_bytes, CompletionOutcome, DiagnosticRecorder, RecordingContext,
+};
 use crate::sse::{SseFrame, SseParser};
 use crate::StreamChat;
 use crate::{classify_upstream_error, map_reqwest_error, StreamError, StreamResult};
@@ -40,11 +44,17 @@ impl StreamChat for OpenAiResponsesStreamer {
         cfg: &ProviderConfig,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
+        recorder: Arc<dyn DiagnosticRecorder>,
+        ctx: &RecordingContext,
     ) -> StreamResult<mpsc::Receiver<StreamEvent>> {
         let api_url = format!("{}/responses", cfg.endpoint.trim_end_matches('/'));
         let body = build_request_body(&cfg.model, messages, tools);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| StreamError::Other(format!("request serialization: {e}")))?;
+
+        recorder
+            .record_request(ctx, &redact_request_bytes(&body_bytes))
+            .await;
 
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -60,15 +70,63 @@ impl StreamChat for OpenAiResponsesStreamer {
             req = req.header("Authorization", format!("Bearer {}", cfg.api_key));
         }
 
-        let resp = req.send().await.map_err(map_reqwest_error)?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = match e.status() {
+                    Some(s) => match s.as_u16() {
+                        401 | 403 => ChatErrorKind::Auth,
+                        404 => ChatErrorKind::ModelNotFound,
+                        429 => ChatErrorKind::RateLimit,
+                        500..=599 => ChatErrorKind::ServerError,
+                        400..=499 => ChatErrorKind::BadRequest,
+                        _ => ChatErrorKind::Unknown,
+                    },
+                    None => ChatErrorKind::Network,
+                };
+                let message = e.to_string();
+                recorder
+                    .record_completion(
+                        ctx,
+                        &CompletionOutcome::PreStreamFailure {
+                            kind,
+                            message: message.clone(),
+                        },
+                    )
+                    .await;
+                return Err(map_reqwest_error(e));
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            let kind = match status.as_u16() {
+                401 | 403 => ChatErrorKind::Auth,
+                404 => ChatErrorKind::ModelNotFound,
+                429 => ChatErrorKind::RateLimit,
+                500..=599 => ChatErrorKind::ServerError,
+                400..=499 => ChatErrorKind::BadRequest,
+                _ => ChatErrorKind::Unknown,
+            };
+            recorder
+                .record_completion(
+                    ctx,
+                    &CompletionOutcome::PreStreamFailure {
+                        kind,
+                        message: format!("upstream returned {}: {}", status.as_u16(), body),
+                    },
+                )
+                .await;
             return Err(classify_upstream_error(status.as_u16(), &body));
         }
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let mut byte_stream = resp.bytes_stream();
+
+        let recorder_task = recorder.clone();
+        let ctx_task = ctx.clone();
+        let mut text_events: u32 = 0;
+        let mut tool_events: u32 = 0;
 
         tokio::spawn(async move {
             let mut sse = SseParser::new();
@@ -79,15 +137,24 @@ impl StreamChat for OpenAiResponsesStreamer {
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
+                        let kind = ChatErrorKind::Network;
+                        let message = format!("stream read error: {e}");
                         let _ = tx
                             .send(StreamEvent::Error {
-                                kind: ChatErrorKind::Network,
-                                message: format!("stream read error: {e}"),
+                                kind,
+                                message: message.clone(),
                             })
+                            .await;
+                        recorder_task
+                            .record_completion(
+                                &ctx_task,
+                                &CompletionOutcome::Error { kind, message },
+                            )
                             .await;
                         break;
                     }
                 };
+                recorder_task.record_response_chunk(&ctx_task, &bytes).await;
                 for frame in sse.feed(&bytes) {
                     let events = match frame {
                         SseFrame::Named { event, data } => {
@@ -98,14 +165,48 @@ impl StreamChat for OpenAiResponsesStreamer {
                     for ev in events {
                         if matches!(ev, StreamEvent::Done) {
                             let _ = tx.send(ev).await;
+                            recorder_task
+                                .record_completion(
+                                    &ctx_task,
+                                    &CompletionOutcome::Done {
+                                        text_events,
+                                        tool_call_events: tool_events,
+                                    },
+                                )
+                                .await;
                             return;
                         }
+                        match &ev {
+                            StreamEvent::Text(_) => text_events += 1,
+                            StreamEvent::ToolCalls(_) => tool_events += 1,
+                            _ => {}
+                        }
                         if tx.send(ev).await.is_err() {
-                            return; // consumer dropped
+                            // Consumer dropped. Flush the recording.
+                            recorder_task
+                                .record_completion(&ctx_task, &CompletionOutcome::Cancelled)
+                                .await;
+                            return;
                         }
                     }
                 }
             }
+            // Stream ended without a terminal response.completed / response.incomplete.
+            let _ = tx
+                .send(StreamEvent::Error {
+                    kind: ChatErrorKind::StreamProtocol,
+                    message: "upstream closed stream without response.completed".to_string(),
+                })
+                .await;
+            recorder_task
+                .record_completion(
+                    &ctx_task,
+                    &CompletionOutcome::Error {
+                        kind: ChatErrorKind::StreamProtocol,
+                        message: "upstream closed stream without response.completed".to_string(),
+                    },
+                )
+                .await;
         });
 
         Ok(rx)
@@ -217,10 +318,7 @@ fn handle_responses_event(
                 .get("output_index")
                 .and_then(|i| i.as_u64())
                 .unwrap_or(0) as u32;
-            let delta = data
-                .get("delta")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
+            let delta = data.get("delta").and_then(|d| d.as_str()).unwrap_or("");
             let tc = pending.entry(output_index).or_default();
             tc.arguments.push_str(delta);
 
