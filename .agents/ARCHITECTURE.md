@@ -249,3 +249,49 @@ match run(cfg, msgs, tools).await {
 
 These are all **deliberately deferred**. The v0.1 API surface is intentionally
 small so it's easier to commit to the shape.
+
+## Pluggability — where the seams are
+
+A laipe consumer should never need to **modify** laipe code to extend it. Every external dependency is reached through an interface that has a default impl but can be replaced. The full principle is in [`AGENTS.md`](AGENTS.md#pluggability--global-design-principle); this section is the architecture map of the seams.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Pluggable interfaces (consumers depend on these, not impls)            │
+│                                                                        │
+│  TS side                          │  Rust side                          │
+│  ────────                         │  ────────                           │
+│  StreamSource        (streams.ts) │  StreamChat        (streaming)     │
+│    • tauriStream (default)         │    • openai_chat  (default)        │
+│    • fetchStream                  │    • openai_responses               │
+│    • mockStream                   │    • anthropic                      │
+│    • your impl                    │    • your impl                      │
+│                                   │                                    │
+│  ConfigStorage      (useConfig)   │  Tool execution (lib.rs match)      │
+│    • localStorage (default)       │    • get_current_time (default)     │
+│    • tauriStorage                 │    • echo                           │
+│    • your impl                    │    • your match arm                 │
+│                                   │                                    │
+│  Slot composition   (composites)  │  ToolDefinition  (just data)        │
+│    • ChatView / MessageBubble /   │  Protocol format  (just data)       │
+│      SettingsModal expose slots   │  ProviderConfig  (just data)        │
+│    • your component               │  ChatMessage     (just data)        │
+│                                   │                                    │
+│  Console transport  (console.ts)  │  ConsoleState  (Tauri-managed)     │
+│    • Tauri events (default)       │    • ConsoleState::new() (default)  │
+│    • console.log hook             │    • console::log() helper          │
+│    • your impl                    │                                    │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+The shape is the same on both sides: **data is just data** (no behavior, no I/O), **behavior is behind an interface** (interface owns the I/O contract), and the **default impl ships with the starter** so you don't write boilerplate until you need to.
+
+### When to add a new seam
+
+Three hardcoded implementations is the rule of thumb. The starter ships:
+- 3 protocol streamers in `laipe-streaming` (worth abstracting — done)
+- 3 stream sources in `laipe-vue` (worth abstracting — done)
+- 1 config storage (worth abstracting — done in v0.2)
+- 2 sample tools (not yet abstracted — fine, a `match` is the natural Rust pattern)
+- 1 console transport (worth abstracting later, not yet)
+
+When your fork has 3 of any kind, the next one should plug in through an interface rather than get appended to a match / array.

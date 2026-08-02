@@ -5,5 +5,5 @@ avoid-breaking-exported-api = false
 cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 7
 type-complexity-threshold = 250
-single-char-elision = "always"
-trivially-copy-pass-by-ref = true
+# Removed in newer clippy: single-char-elision, trivially-copy-pass-by-ref
+# (split into pass-by-value-size-limit / trivial-copy-size-limit; defaults are fine for v0.x)

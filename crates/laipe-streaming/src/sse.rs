@@ -44,11 +44,7 @@ impl SseParser {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
 
-        loop {
-            let Some(end) = find_double_newline(&self.buf) else {
-                break;
-            };
-
+        while let Some(end) = find_double_newline(&self.buf) {
             let frame = self.buf.drain(..end).collect::<Vec<u8>>();
             // Drop the terminator (\n\n or \r\n\r\n).
             if self.buf.starts_with(b"\n\n") {
@@ -76,12 +72,7 @@ impl Default for SseParser {
 }
 
 fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    for i in 0..buf.len().saturating_sub(1) {
-        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
+    (0..buf.len().saturating_sub(1)).find(|&i| buf[i] == b'\n' && buf[i + 1] == b'\n')
 }
 
 fn parse_frame(frame: &[u8]) -> Option<SseFrame> {
@@ -124,7 +115,10 @@ fn parse_frame(frame: &[u8]) -> Option<SseFrame> {
     };
 
     if let Some(name) = event_name {
-        Some(SseFrame::Named { event: name, data: value })
+        Some(SseFrame::Named {
+            event: name,
+            data: value,
+        })
     } else {
         Some(SseFrame::Data(value))
     }
@@ -149,7 +143,8 @@ mod tests {
     #[test]
     fn parses_named_event() {
         let mut p = SseParser::new();
-        let bytes = Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n");
+        let bytes =
+            Bytes::from_static(b"event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n");
         let out = p.feed(&bytes);
         assert_eq!(out.len(), 1);
         match &out[0] {

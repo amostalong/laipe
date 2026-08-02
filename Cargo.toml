@@ -4,7 +4,7 @@ members = [
     "crates/laipe-core",
     "crates/laipe-streaming",
     "crates/laipe-tokio",
-    "examples/vanilla-rust",
+    "laipe-app/src-tauri",
 ]
 
 [workspace.package]

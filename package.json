@@ -1,0 +1,26 @@
+{
+  "name": "laipe-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "laipe — agent client starter (Rust + Vue + Tauri). See AGENTS.md.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "laipe-app"
+  ],
+  "scripts": {
+    "typecheck:ts": "cd packages/laipe-ts && bun run typecheck && cd ../laipe-vue && bun run typecheck && cd ../../laipe-app && bun run typecheck",
+    "build:app-fe": "cd laipe-app && bun run build",
+    "dev:app": "cd laipe-app && bun run dev",
+    "check:rust": "cargo check --workspace",
+    "test:rust": "cargo test --workspace",
+    "clippy:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "fmt:rust": "cargo fmt --check",
+    "check:app-tauri": "cd laipe-app/src-tauri && cargo check",
+    "gates": "bun run fmt:rust && bun run clippy:rust && bun run test:rust && bun run typecheck:ts && bun run build:app-fe && bun run check:app-tauri"
+  },
+  "engines": {
+    "node": ">=20",
+    "bun": ">=1.2"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "laipe-vue",
+  "version": "0.1.0",
+  "description": "Vue 3 components for laipe — composable primitives (MessageBubble, MessageInput, EmptyState, IconButton), composites (ChatView, Sidebar, SettingsModal), and a batteries-included AiChatPanel. Pluggable StreamSource (tauri / fetch / mock).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./primitives": "./src/components/primitives/index.ts",
+    "./composites": "./src/components/composites/index.ts",
+    "./AiChatPanel.vue": "./src/components/AiChatPanel.vue"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "peerDependencies": {
+    "vue": "^3.4.0"
+  },
+  "dependencies": {
+    "laipe-ts": "workspace:*"
+  },
+  "devDependencies": {
+    "@vue/tsconfig": "^0.5.1",
+    "typescript": "^5.6.0",
+    "vue": "^3.4.0",
+    "vue-tsc": "^2.1.0"
+  }
+}

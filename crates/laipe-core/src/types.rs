@@ -29,20 +29,15 @@ pub enum EffortLevel {
 }
 
 /// Where a chat message sits in a conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     System,
+    #[default]
     User,
     Assistant,
     /// Tool result echo (cross-protocol)
     Tool,
-}
-
-impl Default for ChatRole {
-    fn default() -> Self {
-        ChatRole::User
-    }
 }
 
 /// Chat state machine value, mirrored 1:1 from `useStreamReducer` on the TS
@@ -57,6 +52,16 @@ pub enum ChatStatus {
 }
 
 /// A single chat message in any of the three protocols.
+///
+/// The `tool_call_id` / `tool_calls` fields are only used in the tool-calling
+/// flow:
+/// - `role = Tool` requires `tool_call_id` (set by the consumer when responding
+///   to an assistant tool call).
+/// - `role = Assistant` may carry `tool_calls` (the model's declared calls;
+///   the LLM is responsible for emitting these, laipe does not synthesize them).
+///
+/// In the streaming agent loop, the Rust side appends the assistant message
+/// (with `tool_calls`) and a `role = Tool` message for each executed tool.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     pub role: ChatRole,
