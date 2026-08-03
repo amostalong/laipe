@@ -7,8 +7,12 @@
 //
 // Composition:
 //   - ChatView from laipe-vue (the message list + input)
-//   - Topbar with model label + Settings button (→ /settings)
+//   - Topbar with model label + Delete-all button
 //   - Empty-state card when there's no active conversation
+//
+// v0.2.1+: removed the in-topbar "Settings" button. The global
+// TabsBar at the app root is the single entry point for Settings;
+// the chat topbar stays focused on chat actions (clear all).
 //
 // All chat state (`useConfig`, `useConversations`, `useChat`) lives
 // here, NOT in App.vue — when navigating to /settings and back, the
@@ -16,7 +20,7 @@
 // router caches the view by default; we use keep-alive below).
 
 import { computed, onMounted, ref } from "vue";
-import type { ChatMessage, EffortLevel, ProviderConfig, ToolDefinition } from "laipe-ts";
+import type { ChatMessage, ProviderConfig, ToolDefinition } from "laipe-ts";
 import {
   ChatView,
   Sidebar,
@@ -25,12 +29,8 @@ import {
   useChat,
   tauriStream,
 } from "laipe-vue";
-import { useRouter } from "vue-router";
 import { TOOLS } from "../tools";
 import { cleanupModelId, findModel } from "../modelCatalog";
-import ModelSelector from "../components/ModelSelector.vue";
-
-const router = useRouter();
 
 const { config, agentSettings } = useConfig();
 const { conversations, currentId, current, create, select, remove, setMessages, clearAll } =
@@ -76,10 +76,6 @@ function showToast(msg: string, duration = 4000): void {
   }, duration);
 }
 
-function updateEnabledTools(next: Record<string, boolean>): void {
-  agentSettings.value.enabledTools = { ...next };
-}
-
 async function handleSend(text: string): Promise<void> {
   if (!config.value.api_key) {
     showToast("No API key configured. Open Settings to add one.");
@@ -117,10 +113,6 @@ function handleClearAll(): void {
   if (!confirm("Delete all conversations? This cannot be undone.")) return;
   clearAll();
 }
-
-function openSettings(): void {
-  router.push({ name: "settings" });
-}
 </script>
 
 <template>
@@ -153,12 +145,6 @@ function openSettings(): void {
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <path d="M5.5 5.5A.5.5 0 0 1 6 5h4a.5.5 0 0 1 0 1H6a.5.5 0 0 1-.5-.5ZM2.5 3.5A.5.5 0 0 1 3 3h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5ZM3.118 5h9.764l-.804 8.066A2 2 0 0 1 10.092 15H5.908a2 2 0 0 1-1.986-1.934L3.118 5Z" />
           </svg>
-        </button>
-        <button class="btn-settings" @click="openSettings">
-          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.858 2.929 2.929 0 0 1 0 5.858z" />
-          </svg>
-          <span>Settings</span>
         </button>
       </div>
     </header>
@@ -264,22 +250,6 @@ function openSettings(): void {
 }
 .btn-icon svg { width: 16px; height: 16px; }
 .btn-icon:hover { background: rgba(0, 0, 0, 0.06); color: #ff3b30; }
-.btn-settings {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid #d2d2d7;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #1d1d1f;
-  font-size: 0.85em;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-}
-.btn-settings svg { width: 16px; height: 16px; }
-.btn-settings:hover { background: #f0f0f0; }
 
 .no-conversation {
   flex: 1;
