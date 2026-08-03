@@ -14,16 +14,15 @@
 // (this file's first commit) the Tools entry is the only AI-group
 // nav item, alongside Console and Diagnostics under General.
 //
-// Settings state lives in `useConfig()` (laipe-vue) for the provider
-// + agent config; the diagnostic config lives on the Rust side via
-// `getDiagnosticConfig()` / `setDiagnosticConfig()`. The two are
-// independent storage backends; the v0.2+ auto-save pattern keeps
-// both in sync without a Save button.
+// Settings state: `useProviderConfig()` (laipe-app 自有, multi-provider PlotCraft 等价)
+// + `agentSettings` (laipe-vue useConfig 的 agent 配置, 走 localStorage).
+// diagnostic config 走 Rust 端 (getDiagnosticConfig / setDiagnosticConfig).
 
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { useConfig } from "laipe-vue";
+import { useProviderConfig } from "../composables/useProviderConfig";
 import { TOOLS } from "../tools";
 import ProviderPanel from "../components/settings/ProviderPanel.vue";
 import ToolsPanel from "../components/settings/ToolsPanel.vue";
@@ -34,7 +33,10 @@ type Category = "api" | "tools" | "console" | "diagnostics";
 
 const route = useRoute();
 
-const { config, agentSettings, reset: resetConfig } = useConfig();
+// v0.2+ multi-provider: Provider section 走 useProviderConfig (PlotCraft 等价)
+// agentSettings 仍走 laipe-vue useConfig (agent config 跟 provider config 解耦)
+const providerConfig = useProviderConfig()
+const { agentSettings, reset: resetAgentSettings } = useConfig()
 
 const validTabs: ReadonlySet<Category> = new Set<Category>([
   "api",
@@ -72,8 +74,9 @@ function onReset(): void {
     return;
   }
   try {
-    resetConfig();
-    settingsError.value = null;
+    providerConfig.reset()
+    resetAgentSettings()
+    settingsError.value = null
   } catch (e) {
     settingsError.value = e instanceof Error ? e.message : String(e);
   }
@@ -166,8 +169,6 @@ function setActive(cat: Category): void {
         <ProviderPanel
           v-if="activeCategory === 'api'"
           key="api"
-          :config="config"
-          @update:config="(next) => (config = next)"
         />
         <ToolsPanel
           v-else-if="activeCategory === 'tools'"

@@ -31,15 +31,19 @@ import {
 } from "laipe-vue";
 import { TOOLS } from "../tools";
 import { cleanupModelId, findModel } from "../modelCatalog";
+import { useProviderConfig } from "../composables/useProviderConfig";
 
-const { config, agentSettings } = useConfig();
+// v0.2+ multi-provider: provider config 走 useProviderConfig (PlotCraft 等价
+// multi-provider UX), agent settings 走 laipe-vue useConfig (跟 provider 解耦).
+// `cfg` 是 active provider 的 laipe ProviderConfig; 没 active provider 时 null.
+const { config: cfg, agentSettings } = useProviderConfig()
 const { conversations, currentId, current, create, select, remove, setMessages, clearAll } =
-  useConversations();
+  useConversations()
 
 /** Tools that are currently enabled in Settings (filtered from TOOLS). */
 const enabledToolsList = computed<ToolDefinition[]>(() =>
   TOOLS.filter((t) => agentSettings.value.enabledTools[t.function.name] ?? true),
-);
+)
 
 // `tauriStream` invokes the Rust `chat` command; the filtered tool list
 // tells the LLM (and the Rust agent loop) which functions it may call.
@@ -53,13 +57,15 @@ const messages = computed<ChatMessage[]>(() => current.value?.messages ?? []);
 
 /** Topbar model label: catalog name if found, else cleaned+truncated id. */
 const modelDisplay = computed<string>(() => {
-  const m = findModel(config.value.model);
+  const c = cfg.value;
+  if (!c) return "(no active provider)";
+  const m = findModel(c.model);
   if (m) return m.name;
-  return cleanupModelId(config.value.model || "");
+  return cleanupModelId(c.model || "");
 });
 
 onMounted(() => {
-  if (!config.value.api_key) {
+  if (!cfg.value?.api_key) {
     setTimeout(
       () => showToast("Add your API key in Settings to start chatting."),
       800,
@@ -77,7 +83,12 @@ function showToast(msg: string, duration = 4000): void {
 }
 
 async function handleSend(text: string): Promise<void> {
-  if (!config.value.api_key) {
+  const c = cfg.value;
+  if (!c) {
+    showToast("No active provider. Open Settings to configure one.");
+    return;
+  }
+  if (!c.api_key) {
     showToast("No API key configured. Open Settings to add one.");
     return;
   }
@@ -90,7 +101,7 @@ async function handleSend(text: string): Promise<void> {
   // can group saved error reports by conversation. `currentId` may be
   // null for the very first send before `useConversations` has
   // assigned one; pass undefined to let the backend default.
-  await send(config.value, next, currentId.value ?? undefined);
+  await send(c, next, currentId.value ?? undefined);
 }
 
 function handleCancel(): void {
@@ -131,8 +142,8 @@ function handleClearAll(): void {
       <div class="title-area">
         <span class="logo">▰</span>
         <h1>{{ current?.title || "laipe" }}</h1>
-        <span v-if="config.api_key" class="model-tag">
-          {{ modelDisplay }} · {{ config.api_format }}{{ config.effort ? ` · ${config.effort}` : "" }}
+        <span v-if="cfg?.api_key" class="model-tag">
+          {{ modelDisplay }} · {{ cfg?.api_format }}{{ cfg?.effort ? ` · ${cfg.effort}` : "" }}
         </span>
       </div>
       <div class="actions">

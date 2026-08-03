@@ -7,3 +7,4 @@ export { SseParser } from "./sse.js";
 export type { SseFrame } from "./sse.js";
 export { dispatchStream } from "./dispatch.js";
 export type { DispatchOptions } from "./dispatch.js";
+export { testProvider } from "./test.js";

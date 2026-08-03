@@ -55,6 +55,46 @@ export type StreamEvent =
   | { type: "done" }
   | { type: "error"; kind: ChatErrorKind; message: string };
 
+// =============================================================================
+// Test connection (1:1 mirror of crates/laipe-streaming/src/test.rs TestProviderParams / Result)
+// =============================================================================
+
+/**
+ * Parameters for the non-streaming connection test.
+ *
+ * `apiKey` may be empty (local endpoints like Ollama skip auth). The 3-protocol
+ * URL path + auth header + body shape are all derived from `apiFormat`.
+ */
+export interface TestProviderParams {
+  /** Base URL — protocol path (`/chat/completions` etc.) is appended. */
+  endpoint: string;
+  apiKey: string;
+  apiFormat: ApiFormat;
+  /** Model id — written into the request body. */
+  model: string;
+}
+
+/**
+ * Result of a connection test.
+ *
+ * `ok = true` means 2xx response AND we extracted a content text fragment
+ * (so we know auth + model id both worked, not just that the server is up).
+ * `ok = false` carries the failure reason in `error` (human-readable,
+ * includes HTTP status + body preview when available).
+ */
+export interface TestProviderResult {
+  ok: boolean;
+  /** HTTP status code, when we got a response back at all. */
+  status: number | null;
+  error: string | null;
+  /** First content text fragment from the response (server-truncated to 200 chars). */
+  response: string | null;
+  /** Echoed input — useful for UI to show "tested X with Y". */
+  endpoint: string;
+  model: string;
+  apiFormat: ApiFormat;
+}
+
 // --- tool schema (mirror of crates/laipe-core/src/tool.rs) -----------------
 
 export type ToolType = "function";
