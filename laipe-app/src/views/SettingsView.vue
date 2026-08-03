@@ -21,7 +21,7 @@
 // both in sync without a Save button.
 
 import { computed, onMounted, ref, watch } from "vue";
-import { useRouter, useRoute } from "vue-router";
+import { useRoute } from "vue-router";
 
 import { useConfig } from "laipe-vue";
 import { TOOLS } from "../tools";
@@ -32,7 +32,6 @@ import DiagnosticsPanel from "../components/settings/DiagnosticsPanel.vue";
 
 type Category = "api" | "tools" | "console" | "diagnostics";
 
-const router = useRouter();
 const route = useRoute();
 
 const { config, agentSettings, reset: resetConfig } = useConfig();
@@ -65,10 +64,6 @@ onMounted(() => {
 watch(() => route.query, () => {
   syncFromQuery();
 });
-
-function goBack(): void {
-  router.push({ name: "main" });
-}
 
 const settingsError = ref<string | null>(null);
 
@@ -140,13 +135,10 @@ function setActive(cat: Category): void {
     <!-- Sidebar (PlotCraft shape: 220px, grouped nav) -->
     <aside class="settings-sidebar">
       <header class="sidebar-header">
-        <button class="back-btn" @click="goBack" title="Back to chat">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M19 12H5M12 19l-7-7 7-7" />
-          </svg>
-          <span>Back to chat</span>
-        </button>
         <h2 class="sidebar-title">Settings</h2>
+        <p class="sidebar-hint">
+          v0.2+ all edits auto-save. No Save button.
+        </p>
       </header>
 
       <div class="sidebar-nav">
@@ -237,32 +229,21 @@ function setActive(cat: Category): void {
   flex-direction: column;
 }
 .sidebar-header {
-  padding: 12px 12px 0;
+  padding: 16px 16px 12px;
   border-bottom: 1px solid var(--laipe-border, #e5e5e7);
-  padding-bottom: 12px;
   margin-bottom: 8px;
-}
-.back-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  background: transparent;
-  border: none;
-  color: var(--laipe-text-muted, #6e6e73);
-  font-size: 0.78em;
-  cursor: pointer;
-  font-family: inherit;
-  margin-bottom: 8px;
-}
-.back-btn:hover {
-  color: var(--laipe-text, #1d1d1f);
 }
 .sidebar-title {
-  margin: 0;
-  font-size: 1.1em;
+  margin: 0 0 4px 0;
+  font-size: 1.05em;
   font-weight: 600;
   color: var(--laipe-text, #1d1d1f);
+}
+.sidebar-hint {
+  margin: 0;
+  font-size: 0.75em;
+  color: var(--laipe-text-muted, #a1a1a6);
+  line-height: 1.4;
 }
 .sidebar-nav {
   display: flex;

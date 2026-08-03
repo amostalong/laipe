@@ -39,6 +39,7 @@ export {
   Sidebar,
   SettingsModal,
   ConsolePanel,
+  TabsBar,
   MessageBubble,
   MessageInput,
   EmptyState,
@@ -66,6 +67,10 @@ export {
   defaultStreamSource,
 } from "./streams";
 export type { StreamSource } from "./streams";
+
+// Tabs
+export { useTabs } from "./lib/tabs";
+export type { Tab, TabsState } from "./lib/tabs";
 
 // Debug console
 export {
