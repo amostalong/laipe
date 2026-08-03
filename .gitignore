@@ -2,6 +2,15 @@
 /target/
 **/target/
 
+# Node / bun
+/node_modules/
+**/node_modules/
+/dist/
+**/dist/
+
+# Tauri
+/src-tauri/target/
+
 # Cargo lock — keep this committed for libraries; uncomment the next line to ignore it
 # Cargo.lock
 
