@@ -45,6 +45,7 @@ pub mod openai_chat;
 pub mod openai_responses;
 pub mod recorder;
 pub mod sse;
+pub mod test;
 pub mod throttle;
 
 use async_trait::async_trait;
@@ -58,6 +59,7 @@ pub use recorder::{
     redact_request_bytes, CompletionOutcome, DiagnosticRecorder, FileRecorder, NullRecorder,
     RecordingContext,
 };
+pub use test::{params_from_config, test_provider};
 
 /// Convenience alias for `Result<T, StreamError>`.
 pub type StreamResult<T> = std::result::Result<T, StreamError>;

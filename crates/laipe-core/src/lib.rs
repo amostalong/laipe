@@ -18,4 +18,5 @@ pub use error::{ChatErrorDiag, ChatErrorKind};
 pub use tool::{ToolCallInfo, ToolCallPartial, ToolDefinition, ToolResult};
 pub use types::{
     ApiFormat, ChatMessage, ChatRole, ChatStatus, EffortLevel, ProviderConfig, StreamEvent,
+    TestProviderParams, TestProviderResult,
 };
