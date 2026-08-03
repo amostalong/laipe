@@ -7,8 +7,12 @@ rem
 rem  Usage:
 rem    run-laipe-app.bat
 rem
-rem  One-time prereq: tauri-cli
-rem    cargo install tauri-cli --version "^2.0" --locked
+rem  Prerequisites (all already needed by the laipe stack):
+rem    - bun >= 1.2  (frontend deps + JS-side tauri CLI)
+rem    - Rust + the x86_64-pc-windows-msvc target
+rem
+rem  The JS-side tauri CLI (@tauri-apps/cli, installed by `bun install`)
+rem  is used; we do NOT need the cargo-installed `cargo-tauri` binary.
 rem
 rem  First build takes 5-10 min (Tauri's dep tree is large).
 rem  Subsequent builds are fast (incremental).
@@ -16,24 +20,12 @@ rem ============================================================
 
 cd /d "%~dp0"
 
-rem Check for tauri-cli
-where cargo-tauri >nul 2>&1
+rem Check for bun
+where bun >nul 2>&1
 if errorlevel 1 (
-    echo [setup] cargo-tauri not found.
-    echo         Install with:  cargo install tauri-cli --version "^2.0" --locked
-    echo         ^(one-time, ~5-10 min^)
-    echo.
-    set /p INSTALL="Install now? [y/N]: "
-    if /I "%INSTALL%"=="Y" (
-        cargo install tauri-cli --version "^2.0" --locked
-        if errorlevel 1 (
-            echo [error] tauri-cli install failed.
-            exit /b 1
-        )
-    ) else (
-        echo [error] tauri-cli required. Aborting.
-        exit /b 1
-    )
+    echo [error] bun not found in PATH.
+    echo         Install from https://bun.sh and re-run.
+    exit /b 1
 )
 
 if not exist "node_modules" (
