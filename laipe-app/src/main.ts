@@ -2,6 +2,7 @@ import { createApp } from "vue";
 import App from "./App.vue";
 import "./style.css";
 import { initConsole, installConsoleHook } from "laipe-vue";
+import { router } from "./router";
 
 // Install the console hook BEFORE createApp so any logs from app
 // startup (and any errors during App.vue's setup) are captured.
@@ -13,4 +14,6 @@ initConsole().catch((e: unknown) => {
   console.error("[main] initConsole failed:", e);
 });
 
-createApp(App).mount("#app");
+const app = createApp(App);
+app.use(router);
+app.mount("#app");

@@ -17,7 +17,8 @@
     "@tauri-apps/api": "^2.0.0",
     "laipe-ts": "workspace:*",
     "laipe-vue": "workspace:*",
-    "vue": "^3.4.0"
+    "vue": "^3.4.0",
+    "vue-router": "^4.4.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
