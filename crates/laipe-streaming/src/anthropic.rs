@@ -62,7 +62,7 @@ impl StreamChat for AnthropicStreamer {
         ctx: &RecordingContext,
     ) -> StreamResult<mpsc::Receiver<StreamEvent>> {
         let api_url = format!("{}/messages", cfg.endpoint.trim_end_matches('/'));
-        let body = build_request_body(&cfg.model, messages, tools);
+        let body = build_request_body(cfg, messages, tools);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| StreamError::Other(format!("request serialization: {e}")))?;
 
@@ -230,7 +230,7 @@ impl StreamChat for AnthropicStreamer {
 /// Tools policy: if `tools` is None or empty, the `tools` field is **not
 /// written** — closed tools leave the LLM with zero knowledge they exist.
 fn build_request_body(
-    model: &str,
+    cfg: &ProviderConfig,
     messages: &[ChatMessage],
     tools: Option<&[ToolDefinition]>,
 ) -> Value {
@@ -282,7 +282,7 @@ fn build_request_body(
     }
 
     let mut body = json!({
-        "model": model,
+        "model": cfg.model,
         "messages": anthropic_messages,
         "max_tokens": DEFAULT_MAX_TOKENS,
         "stream": true,
@@ -290,6 +290,19 @@ fn build_request_body(
 
     if let Some(system) = system_text {
         body["system"] = json!(system);
+    }
+
+    // v0.2+ thinking controls — emit `thinking: {type: "enabled", budget_tokens}`
+    // when cfg.effort is set (None → omit, Xhigh/Max fall back via the helper).
+    if let Some(effort) = cfg.effort {
+        if let Some(budget) = effort.to_anthropic_budget() {
+            if budget > 0 {
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+            }
+        }
     }
 
     if let Some(tools) = tools {
@@ -416,12 +429,23 @@ fn handle_anthropic_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use laipe_core::types::{ApiFormat, EffortLevel};
     use serde_json::json;
 
     #[test]
     fn build_body_no_tools_pulls_system_out() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.anthropic.com".into(),
+            api_key: "test".into(),
+            model: "claude-3-5-sonnet-20241022".into(),
+            api_format: ApiFormat::AnthropicMessages,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
         let body = build_request_body(
-            "claude-3-5-sonnet-20241022",
+            &cfg,
             &[
                 ChatMessage {
                     role: ChatRole::System,
@@ -453,6 +477,16 @@ mod tests {
 
     #[test]
     fn build_body_with_tools_uses_input_schema_not_parameters() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.anthropic.com".into(),
+            api_key: "test".into(),
+            model: "claude-3-5-sonnet".into(),
+            api_format: ApiFormat::AnthropicMessages,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
         let tools = vec![ToolDefinition {
             kind: Default::default(),
             function: laipe_core::tool::ToolFunction {
@@ -461,7 +495,7 @@ mod tests {
                 parameters: json!({"type": "object"}),
             },
         }];
-        let body = build_request_body("claude-3-5-sonnet", &[], Some(&tools));
+        let body = build_request_body(&cfg, &[], Some(&tools));
         assert_eq!(body["tools"][0]["name"], "echo");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         // Anthropic must NOT have `parameters` or `function` wrapper
@@ -471,8 +505,51 @@ mod tests {
 
     #[test]
     fn build_body_empty_tools_omits_field() {
-        let body = build_request_body("claude-3-5-sonnet", &[], Some(&[]));
+        let cfg = ProviderConfig {
+            endpoint: "https://api.anthropic.com".into(),
+            api_key: "test".into(),
+            model: "claude-3-5-sonnet".into(),
+            api_format: ApiFormat::AnthropicMessages,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
+        let body = build_request_body(&cfg, &[], Some(&[]));
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn build_body_with_effort_emits_thinking_budget() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.anthropic.com".into(),
+            api_key: "test".into(),
+            model: "claude-3-5-sonnet".into(),
+            api_format: ApiFormat::AnthropicMessages,
+            effort: Some(EffortLevel::High),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
+        let body = build_request_body(&cfg, &[], None);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 16384);
+    }
+
+    #[test]
+    fn build_body_effort_none_omits_thinking() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.anthropic.com".into(),
+            api_key: "test".into(),
+            model: "claude-3-5-sonnet".into(),
+            api_format: ApiFormat::AnthropicMessages,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
+        let body = build_request_body(&cfg, &[], None);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

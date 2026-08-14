@@ -34,3 +34,6 @@ bytes = { workspace = true }
 pin-project-lite = { workspace = true }
 tokio-stream = { workspace = true }
 chrono = { workspace = true }
+indexmap = { workspace = true }
+flate2 = { workspace = true }
+once_cell = { workspace = true }

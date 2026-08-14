@@ -48,7 +48,7 @@ impl StreamChat for OpenAiResponsesStreamer {
         ctx: &RecordingContext,
     ) -> StreamResult<mpsc::Receiver<StreamEvent>> {
         let api_url = format!("{}/responses", cfg.endpoint.trim_end_matches('/'));
-        let body = build_request_body(&cfg.model, messages, tools);
+        let body = build_request_body(cfg, messages, tools);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| StreamError::Other(format!("request serialization: {e}")))?;
 
@@ -217,8 +217,12 @@ impl StreamChat for OpenAiResponsesStreamer {
 ///
 /// Tools policy: if `tools` is None or empty, the `tools` field is **not
 /// written**. Closed tools leave the LLM with zero knowledge they exist.
+///
+/// v0.2+ reasoning effort: when `cfg.effort` is set, writes
+/// `reasoning: {effort: "<low|medium|high>"}` (Xhigh/Max dropped — OpenAI doesn't
+/// define them).
 fn build_request_body(
-    model: &str,
+    cfg: &ProviderConfig,
     messages: &[ChatMessage],
     tools: Option<&[ToolDefinition]>,
 ) -> Value {
@@ -239,7 +243,7 @@ fn build_request_body(
         .collect();
 
     let mut body = json!({
-        "model": model,
+        "model": cfg.model,
         "input": input,
         "stream": true,
     });
@@ -260,6 +264,12 @@ fn build_request_body(
                 })
                 .collect();
             body["tools"] = json!(flat_tools);
+        }
+    }
+
+    if let Some(effort) = cfg.effort {
+        if let Some(s) = effort.to_openai_effort() {
+            body["reasoning"] = json!({ "effort": s });
         }
     }
 
@@ -378,12 +388,23 @@ fn handle_responses_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use laipe_core::types::{ApiFormat, EffortLevel};
     use serde_json::json;
 
     #[test]
     fn build_body_no_tools() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            model: "gpt-4o".into(),
+            api_format: ApiFormat::OpenAiResponses,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
         let body = build_request_body(
-            "gpt-4o",
+            &cfg,
             &[ChatMessage {
                 role: ChatRole::User,
                 content: "hi".into(),
@@ -396,16 +417,37 @@ mod tests {
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"], "hi");
         assert_eq!(body["stream"], true);
+        assert!(body.get("reasoning").is_none());
     }
 
     #[test]
     fn build_body_empty_tools_omits_field() {
-        let body = build_request_body("gpt-4o", &[], Some(&[]));
+        let cfg = ProviderConfig {
+            endpoint: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            model: "gpt-4o".into(),
+            api_format: ApiFormat::OpenAiResponses,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
+        let body = build_request_body(&cfg, &[], Some(&[]));
         assert!(body.get("tools").is_none());
     }
 
     #[test]
     fn build_body_with_tools_flattens_to_responses_shape() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            model: "gpt-4o".into(),
+            api_format: ApiFormat::OpenAiResponses,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
         let tools = vec![ToolDefinition {
             kind: Default::default(),
             function: laipe_core::tool::ToolFunction {
@@ -414,11 +456,27 @@ mod tests {
                 parameters: json!({"type": "object"}),
             },
         }];
-        let body = build_request_body("gpt-4o", &[], Some(&tools));
+        let body = build_request_body(&cfg, &[], Some(&tools));
         // Responses shape: flat, no nested `function`
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "echo");
         assert!(body["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn build_body_with_effort_emits_reasoning_effort() {
+        let cfg = ProviderConfig {
+            endpoint: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            model: "o1-mini".into(),
+            api_format: ApiFormat::OpenAiResponses,
+            effort: Some(EffortLevel::Medium),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+        };
+        let body = build_request_body(&cfg, &[], None);
+        assert_eq!(body["reasoning"]["effort"], "medium");
     }
 
     #[test]

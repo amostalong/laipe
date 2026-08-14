@@ -47,6 +47,11 @@ bytes = "1.7"
 pin-project-lite = "0.2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
+# Catalog support (models.dev snapshot + cache)
+indexmap = { version = "2.5", features = ["serde"] }
+flate2 = "1.0"
+once_cell = "1.20"
+
 # lints (stable subset)
 [workspace.lints.rust]
 unsafe_code = "forbid"

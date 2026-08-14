@@ -41,6 +41,7 @@
 #![doc(html_root_url = "https://docs.rs/laipe-streaming/0.1.0")]
 
 pub mod anthropic;
+pub mod model_catalog;
 pub mod openai_chat;
 pub mod openai_responses;
 pub mod recorder;
@@ -178,7 +179,7 @@ pub fn pick(fmt: ApiFormat) -> &'static dyn StreamChatDispatch {
     match fmt {
         OpenAiChat => &openai_chat::OpenAiChatStreamer,
         OpenAiResponses => &openai_responses::OpenAiResponsesStreamer,
-        Anthropic => &anthropic::AnthropicStreamer,
+        AnthropicMessages => &anthropic::AnthropicStreamer,
     }
 }
 

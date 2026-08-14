@@ -18,10 +18,9 @@
 //!   (OpenAI Responses), `/v1/messages` (Anthropic).
 //! - **Auth header**: `Authorization: Bearer <key>` for OpenAI flavors;
 //!   `x-api-key: <key>` + `anthropic-version: 2023-06-01` for Anthropic.
-//! - **Body**: `messages: [{role: user, content: "hi"}]` + `max_tokens: 1`
-//!   + `stream: false` (Anthropic gets the system message stripped to
-//!   a top-level `system` field, per the protocol's no-system-in-messages
-//!   rule).
+//! - **Body**: `{model, messages, max_tokens: 1, stream: false}`. Anthropic
+//!   gets the system message stripped to a top-level `system` field
+//!   (the protocol disallows `system` in messages).
 //! - **Response parser**: pulls first content text from
 //!   `choices[0].message.content` / `output[0].content[0].text` /
 //!   `content[0].text` respectively.
@@ -102,7 +101,7 @@ pub async fn test_provider(params: &TestProviderParams) -> TestProviderResult {
         .post(&api_url)
         .header("Content-Type", "application/json");
     req = apply_auth(req, api_format, api_key);
-    if matches!(api_format, ApiFormat::Anthropic) {
+    if matches!(api_format, ApiFormat::AnthropicMessages) {
         req = req.header("anthropic-version", "2023-06-01");
     }
     let req = req.body(request_bytes);
@@ -130,10 +129,7 @@ pub async fn test_provider(params: &TestProviderParams) -> TestProviderResult {
         return TestProviderResult {
             ok: false,
             status: Some(status_code),
-            error: Some(format!(
-                "HTTP {status_code}: {}",
-                truncate(&body_text, 500)
-            )),
+            error: Some(format!("HTTP {status_code}: {}", truncate(&body_text, 500))),
             response: None,
             endpoint,
             model,
@@ -160,7 +156,9 @@ pub async fn test_provider(params: &TestProviderParams) -> TestProviderResult {
     };
 
     let response_text = extract_response_text(api_format, &parsed);
-    let response_preview = response_text.as_ref().map(|s| truncate(s, MAX_RESPONSE_PREVIEW));
+    let response_preview = response_text
+        .as_ref()
+        .map(|s| truncate(s, MAX_RESPONSE_PREVIEW));
 
     if response_preview.is_none() {
         return TestProviderResult {
@@ -213,7 +211,7 @@ fn build_test_body(api_format: ApiFormat, model: &str) -> serde_json::Value {
             "max_tokens": 1,
             "stream": false,
         }),
-        ApiFormat::Anthropic => serde_json::json!({
+        ApiFormat::AnthropicMessages => serde_json::json!({
             "model": model,
             "max_tokens": 1,
             "messages": messages,
@@ -226,7 +224,7 @@ fn test_endpoint_path(api_format: ApiFormat) -> &'static str {
     match api_format {
         ApiFormat::OpenAiChat => "/chat/completions",
         ApiFormat::OpenAiResponses => "/v1/responses",
-        ApiFormat::Anthropic => "/v1/messages",
+        ApiFormat::AnthropicMessages => "/v1/messages",
     }
 }
 
@@ -242,7 +240,7 @@ fn apply_auth(
         return req;
     }
     match api_format {
-        ApiFormat::Anthropic => req.header("x-api-key", api_key),
+        ApiFormat::AnthropicMessages => req.header("x-api-key", api_key),
         ApiFormat::OpenAiChat | ApiFormat::OpenAiResponses => {
             req.header("Authorization", format!("Bearer {api_key}"))
         }
@@ -269,7 +267,7 @@ fn extract_response_text(api_format: ApiFormat, body: &serde_json::Value) -> Opt
             .and_then(|c| c.get("text"))
             .and_then(|t| t.as_str())
             .map(|s| s.to_string()),
-        ApiFormat::Anthropic => body
+        ApiFormat::AnthropicMessages => body
             .get("content")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("text"))

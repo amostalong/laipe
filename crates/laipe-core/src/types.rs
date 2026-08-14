@@ -6,26 +6,77 @@ use serde::{Deserialize, Serialize};
 ///
 /// LLM clients in the wild have settled on three wire formats. laipe
 /// implements all three so apps can swap providers without code changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Wire-format string values match Locus / PlotCraft (`"openai_chat"`,
+/// `"openai_responses"`, `"anthropic_messages"`) so config.json written by
+/// any of the three can be read by the others.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
     /// OpenAI `/v1/chat/completions` (`data: {...}\n\n` SSE).
+    #[default]
     OpenAiChat,
     /// OpenAI `/v1/responses` (`event: response.output_item.added` etc.).
     OpenAiResponses,
     /// Anthropic `/v1/messages` (`event: content_block_delta` etc.).
-    Anthropic,
+    AnthropicMessages,
 }
 
 /// Per-run reasoning effort / thinking level.
 ///
-/// Most providers map this to a header or a body field. Defaults to None.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Mirrors Locus / PlotCraft: 6 levels so apps can offer the full range
+/// (Anthropic: budget_tokens; OpenAI: `reasoning_effort` / `reasoning.effort`).
+/// Levels not supported by a given model are silently dropped at wire-build time
+/// (`None` here, best-effort).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
+    /// No effort / thinking controls — wire field is omitted.
+    #[default]
+    None,
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
+}
+
+impl EffortLevel {
+    /// OpenAI Chat Completions / Responses API — what to write in
+    /// `reasoning_effort` (Chat) / `reasoning.effort` (Responses).
+    ///
+    /// - `None`        → `None` (field omitted)
+    /// - `Low|Medium|High` → string as-is
+    /// - `Xhigh|Max`   → `None` (OpenAI doesn't define these; silently drop)
+    pub fn to_openai_effort(self) -> Option<&'static str> {
+        match self {
+            EffortLevel::None => None,
+            EffortLevel::Low => Some("low"),
+            EffortLevel::Medium => Some("medium"),
+            EffortLevel::High => Some("high"),
+            EffortLevel::Xhigh | EffortLevel::Max => None,
+        }
+    }
+
+    /// Anthropic Messages API — what to write in
+    /// `thinking.budget_tokens` (paired with `thinking.type = "enabled"`).
+    ///
+    /// - `None` → `None` (field omitted)
+    /// - `Low`  → 1024
+    /// - `Medium` → 4096
+    /// - `High` → 16384
+    /// - `Xhigh` → 32768
+    /// - `Max`  → 65536
+    pub fn to_anthropic_budget(self) -> Option<u32> {
+        match self {
+            EffortLevel::None => None,
+            EffortLevel::Low => Some(1024),
+            EffortLevel::Medium => Some(4096),
+            EffortLevel::High => Some(16384),
+            EffortLevel::Xhigh => Some(32768),
+            EffortLevel::Max => Some(65536),
+        }
+    }
 }
 
 /// Where a chat message sits in a conversation.
