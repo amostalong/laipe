@@ -123,3 +123,109 @@ Wire translation happens inside `build_openai_request_body` /
 
 These are JSON schemas laipe includes in `packages/laipe-ts` /
 `crates/laipe-core` — your app just needs to register handlers.
+
+## Patterns from the field (PlotCraft v0.5+ feedback)
+
+PlotCraft forks `laipe` and ran into four real LLM behavior issues in
+production. These are **recommended patterns** your fork can copy verbatim
+into your system prompt — they solved 100% of the test cases PlotCraft ran
+through with `deepseek-v4-flash` and other models.
+
+### 1. The "1 round 1 tool call" hard rule
+
+LLMs in 2025 are trained to be **helpful** — which means they tend to
+"one-stop fill" by stacking tool calls in a single round, or alternating
+"here's text, here's a tool call" mid-stream. Both behaviors break the
+player's mental model: they want to see one thing at a time and decide.
+
+Add this to your system prompt:
+
+```
+**工具调用节奏（硬规则）**:
+- 1 round 1 tool call — 一次只发起 1 个 tool, 让玩家先选/答完, 再下一轮发新问题
+- **不要**一次发起多个 tool (不要同时调 ask_choose_option + ask_user_question + update_doc_item)
+- 想追问 / 让玩家再做选择 / 写入编辑器 → 拆成 N 轮, 每轮 1 个 tool
+- **不要**自作主张"一站式服务" — 玩家主导节奏, AI 不要催
+```
+
+PlotCraft verified this with deepseek-v4-flash. Before the rule, the
+model would emit `update_doc_item` immediately after `ask_choose_option`
+got declined — a direct violation of player-led UX. After the rule, the
+model waits for an explicit "用 A" / "采用 X" before writing.
+
+### 2. The "update_doc_item 写入硬规则" (playcentric core)
+
+Many LLMs default to "if the user mentioned X, just go write it" — this
+violates player-led design. Add a hard rule that distinguishes **asking
+about X** from **committing to X**:
+
+```
+**update_doc_item 写入硬规则（playcentric 核心）**:
+- **绝不**在玩家没明确说"用 A"/"采用 X"/"写成 Y"时调 update_doc_item
+- **绝不**把"玩家打字问问题 / 描述想法"当成"玩家要求写入" — 问 ≠ 写
+- 玩家在打字问"做成 X 怎么样"/"是不是应该 Y" → 调 ask_user_question 反问 / ask_choose_option 给备选
+  → 玩家选/答完, 下一轮 LLM 才能调 update_doc_item 写入
+- LLM 永不"猜测玩家意图后直接写入" — 必须等玩家先选/答
+```
+
+### 3. The few-shot example pattern (LLM behavioral constraint)
+
+Some models (notably deepseek-v4-flash) ignore abstract rules like "不要
+附 preamble text" and still emit a long preamble as `content` before
+calling `ask_choose_option`. The fix is **showing** them a correct and
+incorrect response, side by side. Add this after your hard rules:
+
+```
+**正确响应示例 (few-shot, deepseek 行为约束)**:
+玩家点 chip "💡 从立意拆支柱" → 你应该**只**调 ask_choose_option tool, **不要**附 preamble text:
+- ✓ 正确: `content=""` (空) + `tool_calls=[{name: "ask_choose_option", arguments: "{\"question\":\"具体问题\",\"options\":[{\"label\":\"X\",\"preview\":\"...\"},{\"label\":\"Y\",\"preview\":\"...\"},{\"label\":\"Z\",\"preview\":\"...\"}]}"}]`
+- ✗ 错误 1: `content="好的, 我帮你拆支柱..."` + tool_calls=[] (附客套话 + 没调 tool)
+- ✗ 错误 2: `content=""` + `tool_calls=[{arguments: "{\"options\":[...]}"}]` (缺 question 字段, 前端解析失败)
+- ✗ 错误 3: `content="从 L1 立意拆 3-5 条..."` (把 chip prompt 复述作为 content 字段 — deepseek 常见错误)
+- ✗ 错误 4: `tool_calls=[{arguments: "{\"question\":\"从 L1 立意拆 3-5 条...\",\"options\":[\"A\",\"B\"]}"}]` (question 字段是整段 prompt 复述 + options 是字符串数组不是对象数组)
+核心: **content 字段保持空** (不附任何文字 / 客套话 / 复述), 让 tool_call 自己说话.
+
+**ask_choose_option schema 关键约束**:
+- `question` 字段 = 1 句具体问题 (**不**是整段 prompt 复述, **不**是 chip label 复述)
+- `options` 数组 = 2-5 个对象, 每个对象**必须**有 `label` (≤10 字) + `preview` (完整备选内容)
+- options 数组元素**必须**是对象, **不**是字符串
+```
+
+PlotCraft verified: with this example block, deepseek-v4-flash started
+emitting `content=""` + properly-shaped `tool_calls` reliably.
+
+### 4. The silently-abandon protocol (player-led UX)
+
+When the player **declines** a tool result (cancels the "Do you want to
+use A?" prompt), the simplest UI choice is "stop calling the LLM and let
+the player type." But the OpenAI/Anthropic protocol requires
+`assistant tool_calls` to be paired with a `tool tool_call_id` message —
+otherwise the model reports "No tool output found" on the next round.
+
+**Anti-pattern** (PlotCraft v0.4.4+): clear `tool_calls` field and
+overwrite `content` with "玩家放弃". This makes the LLM lose the tool
+context and may "guess" what to do (e.g. silently write a doc item).
+
+**Recommended pattern** (PlotCraft v0.5+): keep `tool_calls`, overwrite
+`content` to short "玩家放弃这批备选，等玩家打字。", and **temporarily**
+insert a `role: 'tool'` message into the LLM-bound `messages[]` stream
+(not into `chatHistories` — that would double-render in the UI). The
+"temp insert" can be a function that scans `chatHistories` for
+"silently-abandoned" assistant messages and emits the matching
+`role: 'tool'` content right after them. The function takes the
+`itemId`, reads `chatHistories[itemId]`, and returns the augmented
+array.
+
+UI side: when `role: 'tool'` messages exist, render them **only** as
+content of the matching assistant tool-question bubble ("✓ 已答"
+label) — not as a standalone bubble. Decorator hint: `if (msg.role
+=== 'tool') return []` in your `decorated` computed.
+
+### Source
+
+These patterns come from `D:/Projects/PlotCraft` (the PlotCraft v0.5+
+chat UX feedback loop, August 2026). PlotCraft is a `laipe` fork that
+implements the patterns in its `src/stores/chat.ts` SYSTEM_PROMPT and
+`src/stores/concept.ts` / `world.ts` step-chat paths. The patterns are
+LLM-agnostic — verified on deepseek-v4-flash; recommended for any
+model that shows "helpful assistant" over-training.

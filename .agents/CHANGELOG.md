@@ -4,6 +4,42 @@ All notable changes to laipe are documented here. Format: [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+- **Per-tool execution permission** (auto / ask / deny) — `AgentSettings.toolPermissions` in `laipe-vue` persists a per-tool permission; `useChat` forwards it to the Rust `chat` Tauri command. `execute_tool` honors it:
+  - `auto` — run immediately (default for tools not in the map)
+  - `ask` — emit `chat:tool_needs_approval`; the agent loop parks on a `oneshot` until the user clicks Approve / Deny (or the 5-minute timeout / global Cancel unblocks it with Denied). Frontend `useToolApprovals` composable + `ToolCallCard` Approve/Deny bar drive the wait.
+  - `deny` — synthesize a denial result without running. The LLM is always told via `role: tool` + `{ "error": "user_denied", "tool_call_id": ..., "tool_name": ... }` so the model can react.
+- `chat:tool_result` Tauri event — emitted after every tool call (approved / denied / auto) with `{ call_id, name, result, success, decision }`. The frontend `useToolApprovals` listener updates the corresponding `AssistantToolCall` (`status`, `result`, `error`) so the inline `ToolCallCard` flips to done / denied / error and renders the result body.
+- `approve_tool` / `deny_tool` Tauri commands — pop the pending oneshot for the call id and send the decision.
+- `CancelHandle::cancelled()` — async future in `laipe-tokio` that resolves when `cancel()` is called, designed for `tokio::select!` against approval waiters. The global Stop button unblocks pending approvals instantly.
+- Per-tool permission dropdown in `ToolsSettings` / `ToolsPanel` (Settings → AI Tools) — defaults to `auto`, with a "Reset permissions" link to wipe the map.
+- **Tool calling patterns from the field** (PlotCraft v0.5+ feedback, August 2026) —
+  documented 4 production-tested patterns: "1 round 1 tool call" hard rule, playcentric
+  `update_doc_item` write rule, few-shot example template for LLM behavioral constraint,
+  and the silently-abandon protocol pattern (preserve `tool_calls` field + temporarily
+  insert matching `role: 'tool'` message into the LLM-bound stream). See
+  [TOOL_CALLING.md §Patterns from the field](../docs/TOOL_CALLING.md#patterns-from-the-field-plotcraft-v05-feedback)
+  for the full text + source (PlotCraft fork).
+- **Built-in tool schemas** (3 canonical patterns laipe ships in lib) — `ask_user_question`
+  (2-5 options AltCard), `ask_free_text` (open-ended probe), `update_doc_item` (proposed
+  doc edit, default permission `ask`). The Rust side (`crates/laipe-core/src/builtin_tools.rs`)
+  exposes the canonical enum `BuiltinTool { AskUserQuestion, AskFreeText, UpdateDocItem }`,
+  per-tool metadata table (`BUILTIN_TOOL_META` with `name / label / description / risk /
+  default_permission`), schema builders (`ask_user_question_schema` /
+  `ask_free_text_schema` / `update_doc_item_schema`), `builtin_meta_by_name(name)` for
+  Settings UI lookup, and `builtin_tools()` returning all 3 in canonical order. The TS
+  side (`packages/laipe-ts/src/builtin-tools.ts`) is a 1:1 mirror. `laipe-app/src/tools.ts`
+  spreads `...builtinTools()` into its `TOOLS` list alongside the 2 demo tools
+  (`get_current_time`, `echo`). 13 unit tests in `builtin_tools::tests` cover enum
+  wire-format, meta lookup (known / unknown / case-sensitive), default permissions
+  (Auto / Auto / Ask), schema validity (JSON round-trip, required fields, options
+  `minItems` / `maxItems` / `label.maxLength` / `additionalProperties: false`,
+  `mode` enum + default), schema-vs-meta name sync, and `ToolPermission::default()`
+  being `Auto`. Apps can override per-tool permissions in
+  `AgentSettings.toolPermissions` (laipe-vue). Apps register handler implementations
+  in their own Rust `execute_tool` dispatch — schemas are what the LLM uses to
+  decide when to call, not the implementation.
+
 ### Changed
 - Documentation refresh for v0.2 starter model (README, VISION, ROADMAP rewritten; AGENTS updated)
 - Removed `EXAMPLES.md` — laipe has one app now (`laipe-app/`), its own README covers it

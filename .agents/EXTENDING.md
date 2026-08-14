@@ -683,7 +683,37 @@ Prepend `{ role: "system", content: "..." }` to the messages array before callin
 
 ### How do I gate a tool behind user confirmation?
 
-In `execute_tool`, instead of running immediately, emit a `chat:tool_needs_approval` event with the call details, return a JSON like `{"status": "pending_approval"}`, and wait for a `chat:tool_approved` event from the frontend before actually running. The frontend shows a confirmation card in `MessageBubble`'s `tool-calls` slot; clicking "Approve" fires the approval event.
+`laipe-app` ships a per-tool permission system out of the box (v0.2+).
+The starter wires it up end-to-end; consumer apps get the feature for
+free by storing `AgentSettings.toolPermissions: Record<string,
+"auto" | "ask" | "deny">` and passing that map to `useChat` (the
+third arg). The Rust agent loop in `laipe-app/src-tauri/src/lib.rs`
+honors each permission at `execute_tool` time:
+
+| Permission | Behavior |
+|---|---|
+| `auto`  | Run the tool immediately. Emit `chat:tool_result` so the frontend can render the result in the corresponding `ToolCallCard`. |
+| `ask`   | Emit `chat:tool_needs_approval` with `{ tool_call_id, name, arguments }`. The Rust side parks on a `oneshot` keyed by the call id. The frontend's `useToolApprovals` composable shows an Approve/Deny bar inline in the `MessageBubble`'s `tool-calls` slot. Clicking Approve calls the `approve_tool(call_id)` Tauri command; Deny calls `deny_tool(call_id)`. Both send their decision through the oneshot, unblocking the agent loop. A 5-minute timeout falls back to `deny` if the user walks away. After deciding, the tool runs (or is refused) and `chat:tool_result` is emitted as usual. **The LLM is always told** — denial / auto-deny synthesize a `role: tool` message containing `{ "error": "user_denied", "tool_call_id": ..., "tool_name": ... }` so the model can react. |
+| `deny`  | Never run. Synthesize the same denial result and emit `chat:tool_result` with `success: false, decision: "denied"`. |
+
+Cancellation (`cancel` Tauri command) unblocks any parked approval
+with `Denied`, so the global Stop button works mid-approval without
+deadlocking the agent loop. The cleanup section of `chat` also
+drains the pending-approvals map so a future call with the same id
+isn't accidentally affected.
+
+Custom apps that want a different UX (e.g. a global allowlist, a
+risk-scored auto-policy, a confirmation toast) can:
+
+1. Add new variants to the `ToolPermission` union in `laipe-ts/src/types.ts` and the `ToolPerm` enum in `lib.rs`.
+2. Extend the per-tool settings UI in `ToolsSettings.vue` / `ToolsPanel.vue`.
+3. Branch on the new variant in the `match perm { ... }` block in
+   `lib.rs`'s tool execution loop. The existing `auto` / `ask` /
+   `deny` arms are templates.
+
+If you only need a *single* confirmation prompt for a tool (no per-call
+gating), just set the tool's permission to `"ask"` and forget about
+the others — the per-call flow covers the use case.
 
 ### How do I stream tool progress?
 
