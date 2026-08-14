@@ -10,6 +10,14 @@
 // update so the pretty-printed view appears as soon as the JSON is
 // complete (and falls back to a raw view mid-stream).
 //
+// Approval flow (v0.2+): when the per-tool permission is `"ask"`, the
+// backend sets `call.status = "pending_approval"` and waits for the
+// user to click Approve or Deny. The card renders the action bar
+// inline in the header when the parent supplies `onApprove` / `onDeny`
+// callbacks. If the callbacks are not provided, the card just shows a
+// "pending approval" label (read-only) so consumers that don't need
+// user gating can ignore the new behavior.
+//
 // Extension points:
 //   - `header` slot: replace the name row
 //   - `footer` slot: append custom content (e.g. result preview)
@@ -19,7 +27,7 @@
 //   <ToolCallCard :call="message.tool_calls[0]" />
 
 import { computed, ref } from "vue";
-import type { AssistantToolCall } from "laipe-ts";
+import type { AssistantToolCall, AssistantToolCallStatus } from "laipe-ts";
 
 defineOptions({ name: "ToolCallCard" });
 
@@ -33,8 +41,22 @@ const props = withDefaults(
     error?: string;
     /** Whether the call is still streaming arguments in. */
     pending?: boolean;
+    /** Approve handler — when provided AND status=pending_approval, the
+     *  card renders an Approve button. Host app should send the decision
+     *  to the backend (e.g. via a Tauri command from `useToolApprovals`)
+     *  and update `call.status` to `"running"` afterwards. */
+    onApprove?: () => void;
+    /** Deny handler — same contract as `onApprove`, but the resulting
+     *  `call.status` should be `"denied"`. */
+    onDeny?: () => void;
   }>(),
-  { result: undefined, error: undefined, pending: false },
+  {
+    result: undefined,
+    error: undefined,
+    pending: false,
+    onApprove: undefined,
+    onDeny: undefined,
+  },
 );
 
 defineSlots<{
@@ -47,6 +69,26 @@ const expanded = ref(true);
 
 const displayName = computed(() => props.call.function.name || "<unnamed>");
 const callId = computed(() => props.call.id || "—");
+
+// Effective status — call.status wins; the `pending` prop is kept for
+// backward compat with consumers that haven't adopted the new status
+// field (e.g. partial-JSON streaming while LLM is still emitting).
+const effectiveStatus = computed<AssistantToolCallStatus | undefined>(() => {
+  if (props.call.status) return props.call.status;
+  if (props.pending) return "streaming";
+  return undefined;
+});
+
+const isPendingApproval = computed(
+  () => effectiveStatus.value === "pending_approval",
+);
+const isRunning = computed(() => effectiveStatus.value === "running");
+const isDenied = computed(() => effectiveStatus.value === "denied");
+const isErrorState = computed(() => effectiveStatus.value === "error");
+const isDoneState = computed(() => effectiveStatus.value === "done");
+const isStreamingState = computed(
+  () => effectiveStatus.value === "streaming" || props.pending,
+);
 
 const prettyArgs = computed(() => {
   const raw = props.call.function.arguments;
@@ -82,25 +124,65 @@ const prettyResult = computed(() => {
 </script>
 
 <template>
-  <div :class="['tool-call', { pending, error: !!error }]">
+  <div
+    :class="[
+      'tool-call',
+      {
+        pending: isStreamingState,
+        error: isErrorState || !!error,
+        'awaiting-approval': isPendingApproval,
+        denied: isDenied,
+        running: isRunning,
+      },
+    ]"
+  >
     <div v-if="$slots.header" class="header-slot"><slot name="header" /></div>
     <div v-else class="header">
       <div class="left">
         <span class="icon" aria-hidden="true">⚙</span>
         <span class="name">{{ displayName }}</span>
-        <span v-if="pending" class="status pending">calling…</span>
-        <span v-else-if="error" class="status error">error</span>
-        <span v-else-if="result" class="status done">done</span>
+        <span v-if="isPendingApproval" class="status pending-approval">awaiting approval</span>
+        <span v-else-if="isRunning" class="status running">running…</span>
+        <span v-else-if="isDenied" class="status denied">denied</span>
+        <span v-else-if="isErrorState || error" class="status error">error</span>
+        <span v-else-if="isDoneState || result" class="status done">done</span>
+        <span v-else-if="isStreamingState" class="status pending">calling…</span>
       </div>
-      <button
-        type="button"
-        class="toggle"
-        :aria-expanded="expanded"
-        @click="expanded = !expanded"
-        :title="expanded ? 'Hide arguments' : 'Show arguments'"
-      >
-        {{ expanded ? "▾" : "▸" }}
-      </button>
+      <div class="header-actions">
+        <!-- Approval bar — only when status=pending_approval AND the
+             host wired up the handlers. The buttons are deliberately
+             small and color-coded (green / red) to keep the design
+             language consistent with the rest of the card. -->
+        <div v-if="isPendingApproval" class="approval-bar">
+          <button
+            v-if="onApprove"
+            type="button"
+            class="approval-btn approve"
+            :title="`Approve ${displayName}`"
+            @click="onApprove"
+          >
+            ✓ Approve
+          </button>
+          <button
+            v-if="onDeny"
+            type="button"
+            class="approval-btn deny"
+            :title="`Deny ${displayName}`"
+            @click="onDeny"
+          >
+            ✕ Deny
+          </button>
+        </div>
+        <button
+          type="button"
+          class="toggle"
+          :aria-expanded="expanded"
+          @click="expanded = !expanded"
+          :title="expanded ? 'Hide arguments' : 'Show arguments'"
+        >
+          {{ expanded ? "▾" : "▸" }}
+        </button>
+      </div>
     </div>
 
     <div v-if="$slots.default" class="body"><slot /></div>
@@ -116,13 +198,17 @@ const prettyResult = computed(() => {
         </div>
         <pre class="args"><code>{{ prettyArgs || "(no args)" }}</code></pre>
       </div>
-      <div v-if="error" class="result-block error">
+      <div v-if="isErrorState || error" class="result-block error">
         <div class="result-label">error</div>
-        <pre class="result"><code>{{ error }}</code></pre>
+        <pre class="result"><code>{{ error || call.error || "(no details)" }}</code></pre>
       </div>
-      <div v-else-if="result" class="result-block">
+      <div v-else-if="isDoneState || result" class="result-block">
         <div class="result-label">result</div>
-        <pre class="result"><code>{{ prettyResult }}</code></pre>
+        <pre class="result"><code>{{ prettyResult || call.result }}</code></pre>
+      </div>
+      <div v-else-if="isDenied && (result || call.result)" class="result-block denied">
+        <div class="result-label">denied — server response</div>
+        <pre class="result"><code>{{ prettyResult || call.result }}</code></pre>
       </div>
     </div>
 
@@ -149,6 +235,19 @@ const prettyResult = computed(() => {
   border-color: #ff3b30;
   box-shadow: 0 0 0 1px #ff3b30 inset;
 }
+.tool-call.awaiting-approval {
+  border-color: #ff9500;
+  box-shadow: 0 0 0 1px #ff9500 inset;
+}
+.tool-call.running {
+  border-color: var(--laipe-accent, #007aff);
+  box-shadow: 0 0 0 1px var(--laipe-accent, #007aff) inset;
+}
+.tool-call.denied {
+  border-color: #6e6e73;
+  box-shadow: 0 0 0 1px #6e6e73 inset;
+  opacity: 0.85;
+}
 .header {
   display: flex;
   align-items: center;
@@ -163,6 +262,46 @@ const prettyResult = computed(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.approval-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.approval-btn {
+  font-family: inherit;
+  font-size: 0.92em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s;
+}
+.approval-btn.approve {
+  background: rgba(52, 199, 89, 0.15);
+  color: #248a3d;
+  border-color: rgba(52, 199, 89, 0.4);
+}
+.approval-btn.approve:hover {
+  background: rgba(52, 199, 89, 0.25);
+  border-color: rgba(52, 199, 89, 0.7);
+}
+.approval-btn.deny {
+  background: rgba(255, 59, 48, 0.12);
+  color: #d70015;
+  border-color: rgba(255, 59, 48, 0.4);
+}
+.approval-btn.deny:hover {
+  background: rgba(255, 59, 48, 0.2);
+  border-color: rgba(255, 59, 48, 0.7);
 }
 .icon {
   font-size: 1em;
@@ -187,9 +326,22 @@ const prettyResult = computed(() => {
   color: var(--laipe-accent, #007aff);
   animation: tcPulse 1.2s ease-in-out infinite;
 }
+.status.pending-approval {
+  background: rgba(255, 149, 0, 0.15);
+  color: #c97a00;
+}
+.status.running {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--laipe-accent, #007aff);
+  animation: tcPulse 1.2s ease-in-out infinite;
+}
 .status.done {
   background: rgba(52, 199, 89, 0.15);
   color: #34c759;
+}
+.status.denied {
+  background: rgba(110, 110, 115, 0.15);
+  color: #6e6e73;
 }
 .status.error {
   background: rgba(255, 59, 48, 0.12);
@@ -272,6 +424,10 @@ const prettyResult = computed(() => {
 .result-block.error .result {
   background: rgba(255, 59, 48, 0.08);
   color: #ff3b30;
+}
+.result-block.denied .result {
+  background: rgba(110, 110, 115, 0.08);
+  color: #6e6e73;
 }
 .header-slot,
 .footer-slot {

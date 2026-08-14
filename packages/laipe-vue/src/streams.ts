@@ -31,6 +31,7 @@ import type {
   StreamEvent,
   ToolCallPartial,
   ToolDefinition,
+  ToolPermission,
 } from "laipe-ts";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
@@ -45,7 +46,9 @@ export interface StreamSource {
    * @param tools    - Optional tool definitions. When present, the
    *                   backend / upstream will see the LLM as tool-aware.
    *                   Mirrors the `dispatchStream` arg order from laipe-ts.
-   * @param options  - AbortSignal + conversationId for diagnostic context.
+   * @param options  - AbortSignal + conversationId for diagnostic
+   *                   context, plus `toolPermissions` to tell the
+   *                   backend how to gate each tool (auto / ask / deny).
    *                   `conversationId` is propagated to the diagnostic
    *                   recorder so saved error reports can be grouped
    *                   by conversation.
@@ -54,7 +57,11 @@ export interface StreamSource {
     config: ProviderConfig,
     messages: ChatMessage[],
     tools?: ToolDefinition[],
-    options?: { signal?: AbortSignal; conversationId?: string },
+    options?: {
+      signal?: AbortSignal;
+      conversationId?: string;
+      toolPermissions?: Record<string, ToolPermission>;
+    },
   ): AsyncGenerator<StreamEvent, void, undefined>;
 }
 
@@ -128,6 +135,29 @@ export const tauriStream: StreamSource = {
         });
       }),
     );
+    unlisteners.push(
+      await listen<{
+        tool_call_id: string;
+        name: string;
+        arguments: string;
+      }>("chat:tool_needs_approval", (e) => {
+        // Rust is asking the user to approve a tool call (the tool's
+        // permission is `ask`). Forward as a StreamEvent so useChat can
+        // mark the corresponding AssistantToolCall as `pending_approval`
+        // and render the Approve/Deny buttons.
+        push({
+          type: "tool_pending_approval",
+          tool_call_id: e.payload.tool_call_id,
+          name: e.payload.name,
+          arguments: e.payload.arguments,
+        });
+      }),
+    );
+    // `chat:tool_result` is *not* listened to here on purpose —
+    // `useToolApprovals` is the canonical owner of the result state
+    // (it holds a reference to the AssistantToolCall and mutates
+    // status / result / error in place). Listening here would just
+    // duplicate work and risk the two paths diverging.
 
     // Kick off the Rust side. We don't await it; we wait for events
     // instead. If the invoke itself throws (e.g. IPC error), surface it
@@ -137,6 +167,7 @@ export const tauriStream: StreamSource = {
       messages,
       tools,
       conversationId: options?.conversationId ?? null,
+      toolPermissions: options?.toolPermissions ?? {},
     }).catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e);
       push({ type: "error", kind: "unknown", message: msg });

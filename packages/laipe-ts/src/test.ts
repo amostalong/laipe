@@ -58,7 +58,7 @@ export async function testProvider(
     "Content-Type": "application/json",
   };
   if (apiKey) {
-    if (apiFormat === "anthropic") {
+    if (apiFormat === "anthropic_messages") {
       headers["x-api-key"] = apiKey;
       headers["anthropic-version"] = "2023-06-01";
     } else {
@@ -166,7 +166,7 @@ function buildTestBody(
         max_tokens: 1,
         stream: false,
       };
-    case "anthropic":
+    case "anthropic_messages":
       return {
         model,
         max_tokens: 1,
@@ -181,7 +181,7 @@ function testEndpointPath(apiFormat: ApiFormat): string {
       return "/chat/completions";
     case "openai_responses":
       return "/v1/responses";
-    case "anthropic":
+    case "anthropic_messages":
       return "/v1/messages";
   }
 }
@@ -211,7 +211,7 @@ function extractResponseText(
       const text = firstContent.text;
       return typeof text === "string" ? text : null;
     }
-    case "anthropic": {
+    case "anthropic_messages": {
       const content = b.content;
       if (!Array.isArray(content) || !content[0]) return null;
       const first = content[0] as Record<string, unknown>;

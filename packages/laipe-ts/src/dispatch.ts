@@ -53,7 +53,7 @@ export async function* dispatchStream(
     case "openai_responses":
       yield* streamOpenAiResponses(config, messages, tools, signal);
       break;
-    case "anthropic":
+    case "anthropic_messages":
       yield* streamAnthropic(config, messages, tools, signal);
       break;
   }

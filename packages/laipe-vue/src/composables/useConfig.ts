@@ -11,7 +11,7 @@
 // so `ProviderConfig` stays a pure mirror of the Rust struct.
 
 import { ref, watch } from "vue";
-import type { ProviderConfig } from "laipe-ts";
+import type { ProviderConfig, ToolPermission } from "laipe-ts";
 
 const STORAGE_KEY_CONFIG = "laipe.config.v1";
 const STORAGE_KEY_AGENT = "laipe.agent.v1";
@@ -32,6 +32,13 @@ export interface ConfigStorage {
 export interface AgentSettings {
   /** Per-tool enabled state. Tools not in this map default to true. */
   enabledTools: Record<string, boolean>;
+  /**
+   * Per-tool execution permission. Tools not in this map default to
+   * `"auto"` (run immediately). Set to `"ask"` to gate behind user
+   * approval, or `"deny"` to refuse the call and tell the LLM the
+   * user rejected it.
+   */
+  toolPermissions: Record<string, ToolPermission>;
 }
 
 function defaultConfig(): ProviderConfig {
@@ -44,7 +51,7 @@ function defaultConfig(): ProviderConfig {
 }
 
 function defaultAgentSettings(): AgentSettings {
-  return { enabledTools: {} };
+  return { enabledTools: {}, toolPermissions: {} };
 }
 
 /** Default storage: localStorage (sync). Ships with the starter. */
@@ -93,17 +100,28 @@ export const localStorageConfig: ConfigStorage = {
 const config = ref<ProviderConfig>(defaultConfig());
 const agentSettings = ref<AgentSettings>(defaultAgentSettings());
 let currentStorage: ConfigStorage = localStorageConfig;
-let storageReady: Promise<void> = Promise.resolve();
+
+/** Load provider + agent settings from a storage backend into the refs. */
+async function loadFromStorage(s: ConfigStorage): Promise<void> {
+  const c = await s.loadProviderConfig();
+  if (c) config.value = c;
+  const a = await s.loadAgentSettings();
+  if (a) agentSettings.value = a;
+}
+
+/**
+ * Initial load runs once at module init against the default storage
+ * (localStorage), so saved settings come back on every boot without
+ * any app wiring — same pattern as useConversations. Apps that swap
+ * the backend via setConfigStorage() get a second load against the
+ * new storage, and its data wins (scheduled after this one).
+ */
+let storageReady: Promise<void> = loadFromStorage(currentStorage);
 
 /** Replace the storage backend. Loads from the new storage if it has data. */
 export function setConfigStorage(s: ConfigStorage): void {
   currentStorage = s;
-  storageReady = (async () => {
-    const c = await s.loadProviderConfig();
-    if (c) config.value = c;
-    const a = await s.loadAgentSettings();
-    if (a) agentSettings.value = a;
-  })();
+  storageReady = loadFromStorage(s);
 }
 
 /** Wait for the initial storage load to complete (no-op for sync storages). */
@@ -144,4 +162,24 @@ export function useConfig() {
     isReady,
     agentSettings,
   };
+}
+
+/**
+ * Resolve a tool's permission from the user-facing settings map.
+ * Missing entries default to `"auto"`. Never throws; the contract is
+ * "always returns a valid permission".
+ */
+export function resolveToolPermission(
+  settings: AgentSettings,
+  toolName: string,
+): ToolPermission {
+  return settings.toolPermissions[toolName] ?? "auto";
+}
+
+/** Convenience: is the tool allowed to run at all? `deny` = no. */
+export function isToolAllowed(
+  settings: AgentSettings,
+  toolName: string,
+): boolean {
+  return resolveToolPermission(settings, toolName) !== "deny";
 }

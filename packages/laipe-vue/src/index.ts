@@ -52,6 +52,8 @@ export {
   useChat,
   useConfig,
   useConversations,
+  resolveToolPermission,
+  isToolAllowed,
   setConfigStorage,
   whenConfigReady,
   localStorageConfig,

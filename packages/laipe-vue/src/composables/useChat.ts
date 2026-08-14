@@ -17,10 +17,12 @@
 import { ref } from "vue";
 import type {
   AssistantToolCall,
+  ChatErrorKind,
   ChatMessage,
   ProviderConfig,
   StreamEvent,
   ToolDefinition,
+  ToolPermission,
 } from "laipe-ts";
 import { defaultStreamSource, type StreamSource } from "../streams";
 
@@ -35,30 +37,46 @@ export type ChatStatus = "idle" | "streaming";
  *
  * During streaming, the placeholder's `tool_calls` array accumulates
  * `AssistantToolCall[]` (one entry per streamed call; `arguments` may be
- * partial until the stream completes).
+ * partial until the stream completes). When the backend emits a
+ * `tool_pending_approval` event for one of those calls, the matching
+ * call's `status` is set to `"pending_approval"` so the UI can render an
+ * Approve/Deny bar. The actual approve/deny action is sent to the
+ * backend by the host app (e.g. via Tauri commands from
+ * `useToolApprovals`) — `useChat` itself only mirrors the state.
  *
- * @param source  The transport to stream from. Defaults to `defaultStreamSource()`
- *                (auto-detect Tauri vs browser).
- * @param tools   Tool schemas to make the LLM tool-aware. Pass a static array
- *                for a fixed tool set, or a getter for a reactive list
- *                (e.g. `() => enabledTools.value` so Settings toggles take
- *                effect on the next send).
- * @returns      `{ status, lastError, send, cancel, clearError, tools }`.
+ * @param source          The transport to stream from. Defaults to
+ *                        `defaultStreamSource()` (auto-detect Tauri vs
+ *                        browser).
+ * @param tools           Tool schemas to make the LLM tool-aware. Pass a
+ *                        static array for a fixed tool set, or a getter
+ *                        for a reactive list (e.g.
+ *                        `() => enabledTools.value` so Settings toggles
+ *                        take effect on the next send).
+ * @param toolPermissions Per-tool execution permission, forwarded to the
+ *                        backend so `execute_tool` knows whether to run
+ *                        immediately, wait for user approval, or refuse
+ *                        the call. Defaults to `{}` (every tool → `"auto"`).
+ * @returns               `{ status, lastError, send, cancel, clearError, tools }`.
  *
  * @example
  * ```ts
  * const { status, send, cancel } = useChat(tauriStream, TOOLS);
  * await send(config, messages);
  * // Or with a reactive tool list:
- * const { send } = useChat(tauriStream, () => enabledToolsList.value);
+ * const { send } = useChat(tauriStream, () => enabledToolsList.value, () => agentSettings.toolPermissions);
  * ```
  */
 export function useChat(
   source: StreamSource = defaultStreamSource(),
   tools: ToolDefinition[] | (() => ToolDefinition[]) = [],
+  toolPermissions: Record<string, ToolPermission> | (() => Record<string, ToolPermission>) = {},
 ) {
   const status = ref<ChatStatus>("idle");
   const lastError = ref<string | null>(null);
+  /** v0.2+ last error's ChatErrorKind (mirror of StreamEvent::Error.kind) —
+   *  exposed so the UI can route to the right player-facing message
+   *  (e.g. lib/error-messages.ts → 8 categorical PlayerErrorMessage). */
+  const lastErrorKind = ref<ChatErrorKind | null>(null);
   let aborter: AbortController | null = null;
 
   /**
@@ -95,6 +113,7 @@ export function useChat(
       for await (const ev of source.send(config, messages.slice(0, -1), resolveTools(tools), {
         signal: aborter.signal,
         conversationId,
+        toolPermissions: resolvePermissions(toolPermissions),
       })) {
         applyEvent(ev, assistantMsg);
         if (ev.type === "done" || ev.type === "error") break;
@@ -103,6 +122,8 @@ export function useChat(
       const msg = e instanceof Error ? e.message : String(e);
       assistantMsg.content = `[error] ${msg}`;
       lastError.value = msg;
+      // pre-stream throw: best-effort classify by message text
+      lastErrorKind.value = "unknown";
     } finally {
       status.value = "idle";
       aborter = null;
@@ -114,6 +135,12 @@ export function useChat(
 ): ToolDefinition[] {
   return typeof tools === "function" ? tools() : tools;
 }
+
+  function resolvePermissions(
+    p: Record<string, ToolPermission> | (() => Record<string, ToolPermission>),
+  ): Record<string, ToolPermission> {
+    return typeof p === "function" ? p() : p;
+  }
 
 function applyEvent(ev: StreamEvent, assistantMsg: ChatMessage): void {
     if (ev.type === "text") {
@@ -139,13 +166,25 @@ function applyEvent(ev: StreamEvent, assistantMsg: ChatMessage): void {
               name: p.name ?? "",
               arguments: p.arguments_delta ?? "",
             },
+            status: "streaming",
           };
         }
       }
       assistantMsg.tool_calls = acc;
+    } else if (ev.type === "tool_pending_approval") {
+      // The backend is waiting for the user to Approve/Deny this call.
+      // Flip the matching call's status so the chat UI can render the
+      // approval bar. Match by `id` (the OpenAI-style call id assigned
+      // by the LLM, which the backend forwards verbatim).
+      const acc = assistantMsg.tool_calls ?? [];
+      const call = acc.find((c) => c.id === ev.tool_call_id);
+      if (call) {
+        call.status = "pending_approval";
+      }
     } else if (ev.type === "error") {
       assistantMsg.content = `[${ev.kind}] ${ev.message}`;
       lastError.value = ev.message;
+      lastErrorKind.value = ev.kind;
     }
   }
 
@@ -155,7 +194,8 @@ function applyEvent(ev: StreamEvent, assistantMsg: ChatMessage): void {
 
   function clearError(): void {
     lastError.value = null;
+    lastErrorKind.value = null;
   }
 
-  return { status, lastError, send, cancel, clearError, tools };
+  return { status, lastError, lastErrorKind, send, cancel, clearError, tools };
 }

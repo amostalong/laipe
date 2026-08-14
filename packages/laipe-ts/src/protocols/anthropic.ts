@@ -10,6 +10,7 @@
 
 import type {
   ChatMessage,
+  EffortLevel,
   ProviderConfig,
   StreamEvent,
   ToolCallPartial,
@@ -59,6 +60,12 @@ export async function* streamAnthropic(
     }));
   }
   if (config.temperature !== undefined) body.temperature = config.temperature;
+  if (config.effort) {
+    const budget = anthropicBudgetForEffort(config.effort);
+    if (budget > 0) {
+      body.thinking = { type: "enabled", budget_tokens: budget };
+    }
+  }
 
   const res = await fetch(url, {
     method: "POST",
@@ -200,4 +207,25 @@ function isAbortError(e: unknown): boolean {
     "name" in e &&
     (e as { name: string }).name === "AbortError"
   );
+}
+
+/**
+ * Map `EffortLevel` to Anthropic `thinking.budget_tokens`. None → 0 (caller omits the field).
+ * 1:1 mirror of `laipe_core::EffortLevel::to_anthropic_budget`.
+ */
+export function anthropicBudgetForEffort(effort: EffortLevel): number {
+  switch (effort) {
+    case "none":
+      return 0;
+    case "low":
+      return 1024;
+    case "medium":
+      return 4096;
+    case "high":
+      return 16384;
+    case "xhigh":
+      return 32768;
+    case "max":
+      return 65536;
+  }
 }

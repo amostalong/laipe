@@ -43,7 +43,10 @@ export async function* streamOpenAiChat(
   if (tools && tools.length > 0) body.tools = tools;
   if (config.temperature !== undefined) body.temperature = config.temperature;
   if (config.max_tokens !== undefined) body.max_tokens = config.max_tokens;
-  if (config.effort) body.reasoning_effort = config.effort;
+  if (config.effort) {
+    const s = openaiEffortString(config.effort);
+    if (s) body.reasoning_effort = s;
+  }
 
   const res = await fetch(url, {
     method: "POST",
@@ -145,4 +148,27 @@ function isAbortError(e: unknown): boolean {
     "name" in e &&
     (e as { name: string }).name === "AbortError"
   );
+}
+
+/**
+ * Map `EffortLevel` to the OpenAI Chat Completions / Responses
+ * `reasoning_effort` / `reasoning.effort` value. None / Xhigh / Max
+ * return null (the field is omitted — OpenAI doesn't define Xhigh/Max).
+ * 1:1 mirror of `laipe_core::EffortLevel::to_openai_effort`.
+ */
+export function openaiEffortString(
+  effort: import("../types.js").EffortLevel,
+): "low" | "medium" | "high" | null {
+  switch (effort) {
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+      return "high";
+    case "none":
+    case "xhigh":
+    case "max":
+      return null;
+  }
 }

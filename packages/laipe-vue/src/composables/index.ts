@@ -1,6 +1,8 @@
 export { useChat, type ChatStatus } from "./useChat";
 export {
   useConfig,
+  resolveToolPermission,
+  isToolAllowed,
   setConfigStorage,
   whenConfigReady,
   localStorageConfig,

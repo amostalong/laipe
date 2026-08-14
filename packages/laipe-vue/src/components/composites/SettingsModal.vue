@@ -12,7 +12,15 @@
 //
 // Props / emits:
 //   - `v-model="config"` — ProviderConfig (endpoint, key, model, format, etc.)
-//   - `@close`           — emitted on Esc / backdrop click / Close button
+//   - `v-model:open`     — boolean. The modal emits `update:open: false` on
+//                          every close path (Close button, backdrop, Esc,
+//                          form submit, footer button) so `v-model:open`
+//                          stays in sync. We also keep emitting `close`
+//                          for backward-compat with code that listens
+//                          to it directly.
+//   - `@close`           — emitted alongside `update:open: false` on every
+//                          close path. Kept for callers that prefer the
+//                          explicit event name over v-model.
 
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import type { ApiFormat, ProviderConfig } from "laipe-ts";
@@ -26,6 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:modelValue": [value: ProviderConfig];
+  "update:open": [value: boolean];
   close: [];
 }>();
 
@@ -56,7 +65,7 @@ watch(
 const apiFormats: { value: ApiFormat; label: string; help: string }[] = [
   { value: "openai_chat", label: "OpenAI Chat Completions", help: "POST {endpoint}/chat/completions — works for OpenAI, Azure, GLM, DeepSeek, etc." },
   { value: "openai_responses", label: "OpenAI Responses", help: "POST {endpoint}/responses — newer OpenAI endpoint, event-based SSE." },
-  { value: "anthropic", label: "Anthropic Messages", help: "POST {endpoint}/v1/messages — direct from browser with the dangerous-direct-browser-access header." },
+  { value: "anthropic_messages", label: "Anthropic Messages", help: "POST {endpoint}/v1/messages — direct from browser with the dangerous-direct-browser-access header." },
 ];
 
 const temperatureStr = ref(
@@ -77,6 +86,32 @@ const showAdvanced = ref(false);
 
 function commit(): void {
   emit("update:modelValue", { ...draft.value });
+}
+
+/**
+ * Single source of truth for closing the modal. Fires both:
+ *   - `close`            — explicit event for `@close` listeners
+ *   - `update:open: false` — required so `v-model:open` stays in sync
+ *
+ * Also calls `commit()` first so any in-flight edits to `draft` that
+ * haven't been blurred (and therefore haven't fired `@change` yet)
+ * still propagate to the parent + get persisted. Without this, a
+ * user who types into Endpoint then immediately hits Esc loses the
+ * change on the next reload.
+ *
+ * The `if (props.open)` guard avoids redundant emits when the parent
+ * has already set `open = false` externally (defensive).
+ *
+ * Trade-off: there's no "Cancel / discard" path right now. Closing
+ * via any route (X / Esc / backdrop / footer Close / form submit)
+ * commits the draft. If the user wants to revert, they can clear the
+ * field before closing, or we can add a dedicated Cancel button later.
+ */
+function closeModal(): void {
+  if (!props.open) return;
+  commit();
+  emit("close");
+  emit("update:open", false);
 }
 
 function onTemperatureInput(): void {
@@ -102,11 +137,11 @@ function onMaxTokensInput(): void {
 }
 
 function onBackdropClick(e: MouseEvent): void {
-  if (e.target === e.currentTarget) emit("close");
+  if (e.target === e.currentTarget) closeModal();
 }
 
 function onEscape(e: KeyboardEvent): void {
-  if (e.key === "Escape" && props.open) emit("close");
+  if (e.key === "Escape" && props.open) closeModal();
 }
 
 onMounted(() => window.addEventListener("keydown", onEscape));
@@ -119,16 +154,41 @@ onUnmounted(() => window.removeEventListener("keydown", onEscape));
       <div class="modal" role="dialog" aria-labelledby="settings-title">
         <header class="modal-header">
           <h2 id="settings-title">Settings</h2>
-          <button class="btn-close" title="Close (Esc)" @click="emit('close')">
+          <button class="btn-close" title="Close (Esc)" @click="closeModal()">
             <svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
               <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708Z" />
             </svg>
           </button>
         </header>
 
-        <form class="modal-body" @submit.prevent="emit('close')">
-          <!-- `model` slot: app-supplied model selector -->
+        <form class="modal-body" @submit.prevent="closeModal()">
+          <!-- `model` slot: app-supplied fancy model selector (e.g.
+               ModelEffortSelector with reasoning effort controls).
+               When provided, it REPLACES the default Model input
+               below — apps that need a richer selector should pass
+               it; apps that just need a plain text field get the
+               default. -->
           <slot name="model" />
+
+          <!-- Default Model input — only shown when no `model` slot
+               is supplied. Single-provider apps (and most v0.1 apps)
+               don't need a fancy selector; a plain text field is
+               enough. -->
+          <label v-if="!$slots.model" class="field">
+            <span class="label">Model</span>
+            <input
+              v-model="draft.model"
+              type="text"
+              placeholder="gpt-4o-mini"
+              spellcheck="false"
+              @change="commit"
+            />
+            <small class="help">
+              The model name to send in the API request. Must be one
+              your endpoint actually serves (e.g. <code>gpt-4o</code>,
+              <code>claude-3-5-sonnet-20241022</code>).
+            </small>
+          </label>
 
           <!-- Connection: Endpoint, API Key, API Format -->
           <section class="field-group">
@@ -207,7 +267,7 @@ onUnmounted(() => window.removeEventListener("keydown", onEscape));
 
         <footer class="modal-footer">
           <slot name="footer">
-            <button type="button" class="btn-secondary" @click="emit('close')">Close</button>
+            <button type="button" class="btn-secondary" @click="closeModal()">Close</button>
           </slot>
         </footer>
       </div>

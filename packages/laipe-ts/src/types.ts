@@ -3,9 +3,9 @@
 // stay camelCase. The `role` and `api_format` discriminators use string
 // literals so the JSON shape is the same on both sides.
 
-export type ApiFormat = "openai_chat" | "openai_responses" | "anthropic";
+export type ApiFormat = "openai_chat" | "openai_responses" | "anthropic_messages";
 
-export type EffortLevel = "low" | "medium" | "high";
+export type EffortLevel = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
@@ -40,7 +40,33 @@ export interface AssistantToolCall {
   id: string;
   type: "function";
   function: AssistantToolCallFunction;
+  /**
+   * UI-only lifecycle status. Not part of the wire format — the Rust
+   * backend tracks the canonical state, the frontend mirrors it for
+   * rendering. The composable updates this as `tool_pending_approval`
+   * and tool result events arrive.
+   *
+   * - `streaming`           — LLM is still emitting the call (arguments partial)
+   * - `pending_approval`    — LLM finished the call, awaiting user Approve/Deny
+   * - `running`             — user approved, backend is executing
+   * - `done`                — tool ran, result available in `.result`
+   * - `denied`              — user denied (or permission=deny), see `.result` for the reason
+   * - `error`               — backend reported an error, see `.error`
+   */
+  status?: AssistantToolCallStatus;
+  /** Final JSON result string, populated when status=`done` or `denied`. */
+  result?: string;
+  /** Human-readable error message, populated when status=`error`. */
+  error?: string;
 }
+
+export type AssistantToolCallStatus =
+  | "streaming"
+  | "pending_approval"
+  | "running"
+  | "done"
+  | "denied"
+  | "error";
 
 export interface AssistantToolCallFunction {
   name: string;
@@ -48,10 +74,31 @@ export interface AssistantToolCallFunction {
   arguments: string;
 }
 
-/// What `dispatchStream` yields. Mirrors `laipe_core::StreamEvent` 1:1.
+/**
+ * Per-tool permission. Stored in `AgentSettings.toolPermissions`,
+ * passed to the Rust `chat` command so `execute_tool` knows how to
+ * handle each call.
+ *
+ * - `auto` — run immediately (default for tools not in the map)
+ * - `ask`  — wait for the user to click Approve/Deny in the UI
+ * - `deny` — refuse the call; push `role: tool` with `{ error: "user_denied" }`
+ *            so the LLM can react to the rejection
+ */
+export type ToolPermission = "auto" | "ask" | "deny";
+
+/// What `dispatchStream` yields. Mirrors `laipe_core::StreamEvent` 1:1
+/// plus the `tool_pending_approval` extension event that the Rust
+/// `chat` command emits when a tool is gated behind `ask` permission.
 export type StreamEvent =
   | { type: "text"; delta: string }
   | { type: "tool_calls"; partials: ToolCallPartial[] }
+  | {
+      /** Backend is asking the user to approve a tool call (permission=ask). */
+      type: "tool_pending_approval";
+      tool_call_id: string;
+      name: string;
+      arguments: string;
+    }
   | { type: "done" }
   | { type: "error"; kind: ChatErrorKind; message: string };
 
@@ -151,4 +198,61 @@ export interface ChatErrorDiag {
   request_id?: string;
   /** Internal stage where the error was raised */
   stage?: string;
+}
+
+// =============================================================================
+// Model catalog (1:1 mirror of crates/laipe-streaming/src/model_catalog.rs
+// ResolvedCatalog schema — camelCase via #[serde(rename_all = "camelCase")])
+// =============================================================================
+
+/**
+ * One model in the catalog. Mirrors `laipe_streaming::model_catalog::ResolvedModel`.
+ * `id` is the model id sent to the LLM API (e.g. `"gpt-4o-mini"`,
+ * `"claude-sonnet-4-5"`, `"deepseek-chat"`).
+ */
+export interface CatalogModel {
+  id: string;
+  name: string;
+  /** Context window in tokens. */
+  context_window: number;
+  /** Max output tokens. */
+  output_limit: number;
+  /** Model supports reasoning / thinking controls. */
+  reasoning: boolean;
+  /** Model supports tool/function calling. */
+  tool_call: boolean;
+  /** Model supports image input. */
+  vision: boolean;
+  /** ISO release date string, when known. */
+  release_date?: string;
+  /** `"deprecated"` etc. — UI should de-emphasize / hide. */
+  status?: string;
+}
+
+/**
+ * One provider in the catalog. Mirrors
+ * `laipe_streaming::model_catalog::ResolvedProvider`.
+ *
+ * `endpoint` is the resolved base URL (from `api` or the
+ * OFFICIAL_API_FALLBACKS map). `suggested_api_format` is the wire
+ * protocol the UI should default to (Anthropic npm → `anthropic_messages`,
+ * everything else → `openai_chat`).
+ */
+export interface CatalogProvider {
+  id: string;
+  name: string;
+  endpoint: string;
+  npm?: string;
+  suggested_api_format: ApiFormat;
+  models: CatalogModel[];
+}
+
+/**
+ * Top-level model catalog returned by `get_model_catalog` / `refresh_model_catalog`.
+ * Mirrors `laipe_streaming::model_catalog::ResolvedCatalog`.
+ */
+export interface ModelCatalog {
+  /** ISO 8601 timestamp of when the catalog was fetched / embedded. */
+  fetched_at: string;
+  providers: CatalogProvider[];
 }
