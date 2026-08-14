@@ -9,19 +9,27 @@
 //!   │   Vue 3 UI (Vite-bundled)                                 │
 //!   │        │                                                  │
 //!   │        │ invoke('chat', { cfg, messages, tools,           │
-//!   │        │                  conversation_id })              │
+//!   │        │       tool_permissions, conversation_id })        │
+//!   │        │ invoke('approve_tool' / 'deny_tool', { call_id })│
 //!   │        ▼                                                  │
 //!   │   Tauri IPC                                               │
 //!   │        │                                                  │
 //!   │        │  events: chat:chunk, chat:tool_calls,            │
+//!   │        │          chat:tool_needs_approval,               │
+//!   │        │          chat:tool_result,                       │
 //!   │        │          chat:done, chat:error, chat:cancelled   │
 //!   │        ▼                                                  │
 //!   │   Rust backend (this crate)                               │
 //!   │        │                                                  │
 //!   │        │  1. dispatch(cfg, messages, tools, recorder)     │
-//!   │        │  2. receive ToolCalls → execute →                │
-//!   │        │     append tool results to messages →             │
-//!   │        │  3. re-dispatch (up to MAX_AGENT_TURNS)          │
+//!   │        │  2. receive ToolCalls → for each call:           │
+//!   │        │     - perm=auto   → run immediately              │
+//!   │        │     - perm=ask    → emit needs_approval,         │
+//!   │        │                    await approve_tool/deny_tool  │
+//!   │        │     - perm=deny   → synthesize denial           │
+//!   │        │     always emit chat:tool_result with the JSON   │
+//!   │        │  3. append tool results to messages →            │
+//!   │        │  4. re-dispatch (up to MAX_AGENT_TURNS)          │
 //!   │        ▼                                                  │
 //!   │   mpsc::Receiver<StreamEvent>                             │
 //!   │                                                           │
@@ -49,12 +57,15 @@ use laipe_core::types::{
 };
 use laipe_streaming::RecordingContext;
 use laipe_tokio::CancelHandle;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 mod console;
 mod diagnostics;
+mod model_catalog;
 
 use console::{ConsoleDiag, ConsoleState};
 use diagnostics::{DiagnosticConfig, DiagnosticsState};
@@ -63,10 +74,50 @@ use diagnostics::{DiagnosticConfig, DiagnosticsState};
 /// Bounds runaway loops when a tool keeps making more tool calls.
 const MAX_AGENT_TURNS: u32 = 4;
 
-/// Per-app state. Holds the cancel handle for the in-flight chat (if any).
+/// How long a `permission = "ask"` tool waits for the user to click
+/// Approve / Deny before falling back to "denied" (so a stale
+/// approval prompt never blocks the agent loop forever).
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// The decision the user (or policy) made about a single tool call.
+/// Forwarded to the LLM as a `role: tool` result so it can react to
+/// the rejection (e.g. choose a different tool, ask the user, or
+/// give up).
+#[derive(Debug, Clone, Copy)]
+enum ApprovalDecision {
+    Approved,
+    Denied,
+}
+
+/// Per-app state. Holds the cancel handle for the in-flight chat (if any)
+/// and the map of pending tool-approval waiters, keyed by the LLM-assigned
+/// tool-call id. `approve_tool` / `deny_tool` Tauri commands pop from the
+/// map and send the decision through the oneshot channel.
 #[derive(Default)]
 struct AppState {
     cancel: Arc<Mutex<Option<CancelHandle>>>,
+    pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>>,
+}
+
+/// Per-tool execution permission, mirrored from the TS-side
+/// `ToolPermission` literal. Anything we don't recognize falls back to
+/// `"auto"` (run immediately) so missing/malformed values never
+/// accidentally block the chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPerm {
+    Auto,
+    Ask,
+    Deny,
+}
+
+impl ToolPerm {
+    fn parse(s: &str) -> Self {
+        match s {
+            "ask" => Self::Ask,
+            "deny" => Self::Deny,
+            _ => Self::Auto,
+        }
+    }
 }
 
 /// Stream a chat completion with optional tool-calling agent loop.
@@ -74,18 +125,33 @@ struct AppState {
 /// Flow per turn:
 ///   1. Dispatch to LLM with the current messages + tools + diagnostic recorder
 ///   2. Stream text deltas and tool-call declarations to the frontend
-///   3. On `Done`, if tool calls were declared, execute them, append the
-///      results as `role: tool` messages, and re-dispatch (next turn)
-///   4. If no tool calls, emit `chat:done` and return
+///   3. On `Done`, if tool calls were declared, execute them according to
+///      the per-tool permission in `tool_permissions`:
+///        - `auto`  — run immediately
+///        - `ask`   — emit `chat:tool_needs_approval`; wait for the user
+///                    to call `approve_tool` / `deny_tool` (or until
+///                    `APPROVAL_TIMEOUT` elapses / the user hits Cancel)
+///        - `deny`  — synthesize a denial result, do not run
+///      In every case the result is appended as a `role: tool` message
+///      and a `chat:tool_result` event is emitted so the frontend can
+///      render the result inline in the corresponding `ToolCallCard`.
+///   4. Re-dispatch (next turn) until no tool calls or `MAX_AGENT_TURNS`
 ///
 /// `conversation_id` flows through to the diagnostic recorder so saved
 /// reports can be grouped by conversation. The frontend passes the
 /// active `useConversations().currentId`.
+// Tauri commands receive a fixed set of state-injected params (app,
+// state, diag). Combined with the user-facing args this pushes us
+// over clippy's 7-arg default, but the signature is dictated by
+// `#[tauri::command]` — refactoring to a struct arg is a bigger
+// change than the lint is worth.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn chat(
     cfg: ProviderConfig,
     messages: Vec<ChatMessage>,
     tools: Option<Vec<ToolDefinition>>,
+    tool_permissions: Option<HashMap<String, String>>,
     conversation_id: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
@@ -100,17 +166,24 @@ async fn chat(
         }
         *guard = Some(cancel.clone());
     }
+    let pending_approvals = state.pending_approvals.clone();
+    let tool_permissions: HashMap<String, ToolPerm> = tool_permissions
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| (k, ToolPerm::parse(&v)))
+        .collect();
     let _ = app.emit("chat:start", ());
     console::log(
         &app,
         "info",
         "llm",
         format!(
-            "chat start: model={} format={:?} messages={} tools={} conv={}",
+            "chat start: model={} format={:?} messages={} tools={} perms={} conv={}",
             cfg.model,
             cfg.api_format,
             messages.len(),
             tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            tool_permissions.len(),
             conversation_id.as_deref().unwrap_or("(none)"),
         ),
     );
@@ -319,14 +392,130 @@ async fn chat(
                 ),
             });
 
-            // 5) Execute each tool and append a `role: tool` result message.
+            // 5) Execute each tool (gated by per-tool permission) and
+            //    append a `role: tool` result message. Every call
+            //    also emits a `chat:tool_result` event so the frontend
+            //    can render the outcome inline in the corresponding
+            //    `ToolCallCard`, regardless of whether it was approved,
+            //    denied, or auto-run.
             for part in &tool_calls {
-                let result_json =
-                    execute_tool(part.name.as_deref().unwrap_or(""), &part.arguments_delta);
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let name = part.name.as_deref().unwrap_or("");
+                let call_id = part.id.clone().unwrap_or_default();
+                let perm = tool_permissions
+                    .get(name)
+                    .copied()
+                    .unwrap_or(ToolPerm::Auto);
+
+                let (result_json, decision) = match perm {
+                    ToolPerm::Deny => {
+                        // Policy: never run. Synthesize a denial result
+                        // so the LLM sees the rejection and can adjust
+                        // (pick a different tool, ask the user, etc.).
+                        let json = serde_json::json!({
+                            "error": "user_denied",
+                            "reason": "denied by policy",
+                            "tool_call_id": &call_id,
+                            "tool_name": name,
+                        })
+                        .to_string();
+                        (json, "denied")
+                    }
+                    ToolPerm::Ask => {
+                        // Ask the user. We emit the event with the
+                        // call's details, park a oneshot into the shared
+                        // pending-approvals map, then `select!` on the
+                        // decision / cancel / timeout.
+                        let _ = app.emit(
+                            "chat:tool_needs_approval",
+                            serde_json::json!({
+                                "tool_call_id": &call_id,
+                                "name": name,
+                                "arguments": &part.arguments_delta,
+                            }),
+                        );
+                        let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+                        {
+                            let mut g = pending_approvals.lock().await;
+                            g.insert(call_id.clone(), tx);
+                        }
+                        console::log(
+                            &app,
+                            "info",
+                            "tool",
+                            format!("awaiting approval: {name} (call_id={call_id})"),
+                        );
+
+                        let decision = tokio::select! {
+                            biased;
+                            // Cancel unblocks first — the user is in charge.
+                            _ = cancel.cancelled() => ApprovalDecision::Denied,
+                            // Oneshot from approve_tool / deny_tool.
+                            d = rx => d.unwrap_or(ApprovalDecision::Denied),
+                            // Fallback so a stale prompt never blocks forever.
+                            _ = tokio::time::sleep(APPROVAL_TIMEOUT) => ApprovalDecision::Denied,
+                        };
+                        // Remove from map regardless of how the wait ended,
+                        // so a duplicate Approve click after timeout doesn't
+                        // accidentally affect a future call.
+                        {
+                            let mut g = pending_approvals.lock().await;
+                            g.remove(&call_id);
+                        }
+                        match decision {
+                            ApprovalDecision::Approved => {
+                                let json = execute_tool(name, &part.arguments_delta);
+                                (json, "approved")
+                            }
+                            ApprovalDecision::Denied => {
+                                let json = serde_json::json!({
+                                    "error": "user_denied",
+                                    "reason": "user clicked Deny",
+                                    "tool_call_id": &call_id,
+                                    "tool_name": name,
+                                })
+                                .to_string();
+                                (json, "denied")
+                            }
+                        }
+                    }
+                    ToolPerm::Auto => {
+                        let json = execute_tool(name, &part.arguments_delta);
+                        (json, "auto")
+                    }
+                };
+
+                // Surface the result to the frontend so the inline
+                // `ToolCallCard` can flip to "done" / "denied" / "error"
+                // and render the result body. `success` is a coarse
+                // boolean; the `decision` carries the reason.
+                let success = !result_json.contains("\"error\"");
+                let _ = app.emit(
+                    "chat:tool_result",
+                    serde_json::json!({
+                        "call_id": &call_id,
+                        "name": name,
+                        "result": &result_json,
+                        "success": success,
+                        "decision": decision,
+                    }),
+                );
+                console::log(
+                    &app,
+                    if success { "info" } else { "warn" },
+                    "tool",
+                    format!(
+                        "tool {name} ({decision}, success={success}): {} bytes",
+                        result_json.len()
+                    ),
+                );
+
                 let tool_msg = ChatMessage {
                     role: ChatRole::Tool,
                     content: result_json,
-                    tool_call_id: part.id.clone(),
+                    tool_call_id: Some(call_id),
                     tool_calls: None,
                 };
                 working.push(tool_msg);
@@ -340,7 +529,10 @@ async fn chat(
     }
     .await;
 
-    // Clean up cancel handle
+    // Clean up cancel handle + drain any orphaned tool-approval waiters.
+    // The drain is best-effort: if the waiters are already past the
+    // `select!`, the send fails silently. If they're still parked,
+    // they wake up to `Denied` and the agent loop can return.
     {
         let mut guard = state.cancel.lock().await;
         if let Some(h) = guard.as_ref() {
@@ -350,8 +542,40 @@ async fn chat(
         }
         *guard = None;
     }
+    {
+        let mut g = state.pending_approvals.lock().await;
+        let pending_ids: Vec<String> = g.keys().cloned().collect();
+        for id in pending_ids {
+            if let Some(tx) = g.remove(&id) {
+                let _ = tx.send(ApprovalDecision::Denied);
+            }
+        }
+    }
 
     result
+}
+
+/// Approve a pending tool call (the matching `execute_tool` is parked
+/// on a oneshot, waiting for this signal). Idempotent — calling it
+/// twice for the same `call_id` is a no-op; calling it for an
+/// unknown id is also a no-op (the request is silently dropped).
+#[tauri::command]
+async fn approve_tool(call_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut g = state.pending_approvals.lock().await;
+    if let Some(tx) = g.remove(&call_id) {
+        let _ = tx.send(ApprovalDecision::Approved);
+    }
+    Ok(())
+}
+
+/// Deny a pending tool call. Same contract as `approve_tool`.
+#[tauri::command]
+async fn deny_tool(call_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut g = state.pending_approvals.lock().await;
+    if let Some(tx) = g.remove(&call_id) {
+        let _ = tx.send(ApprovalDecision::Denied);
+    }
+    Ok(())
 }
 
 /// Tool registry — a single match against tool name. Add new tools here.
@@ -520,7 +744,7 @@ fn api_format_match_static(s: &str) -> &'static str {
     match s {
         "openai_chat" => "openai_chat",
         "openai_responses" => "openai_responses",
-        "anthropic" => "anthropic",
+        "anthropic_messages" => "anthropic_messages",
         _ => "unknown",
     }
 }
@@ -548,22 +772,34 @@ pub fn run() {
             // `async_runtime::block_on` pattern Tauri 2 itself uses
             // for its setup hooks.
             let handle = app.handle().clone();
+            let handle_for_bg = handle.clone();
             let state: tauri::State<'_, DiagnosticsState> = app.state();
             let inner_arc = state.shared();
             tauri::async_runtime::block_on(async move {
                 DiagnosticsState::initialize_from_arc(inner_arc, &handle).await;
             });
+
+            // v0.2+ spawn background model catalog refresh (镜像 PlotCraft):
+            // - 5s 后检查 cache; > 24h 才真拉
+            // - 失败 fallback freshest local
+            // - 不阻塞 startup
+            model_catalog::spawn_background_refresh(handle_for_bg);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             chat,
             cancel,
+            approve_tool,
+            deny_tool,
             console::get_console_entries,
             console::clear_console,
             console::get_console_entry_by_id,
             get_diagnostic_mode,
             set_diagnostic_mode,
             dump_error_report,
+            model_catalog::get_model_catalog,
+            model_catalog::refresh_model_catalog,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

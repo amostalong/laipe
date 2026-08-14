@@ -1,53 +1,102 @@
 <script setup lang="ts">
 // MainView — the chat view (the "main" route).
 //
-// v0.2+ extracted from App.vue when Settings became its own route
-// (`/settings`). The conversation Sidebar stays in App.vue so it
-// can be conditionally hidden on non-main routes.
+// v0.2+ 设计:
+// - ChatView from laipe-vue (message list + input)
+// - Topbar: model display via ModelEffortSelector (chat 端选 model + effort)
+// - 错误反馈: 8 分类玩家文案 + retry (镜像 PlotCraft SessionView 错误条)
 //
-// Composition:
-//   - ChatView from laipe-vue (the message list + input)
-//   - Topbar with model label + Delete-all button
-//   - Empty-state card when there's no active conversation
+// v0.2+ tool approval: 走 laipe-vue useToolApprovals + 现有 useChat 架构.
 //
-// v0.2.1+: removed the in-topbar "Settings" button. The global
-// TabsBar at the app root is the single entry point for Settings;
-// the chat topbar stays focused on chat actions (clear all).
-//
-// All chat state (`useConfig`, `useConversations`, `useChat`) lives
-// here, NOT in App.vue — when navigating to /settings and back, the
-// chat state is preserved because the component is kept alive (the
-// router caches the view by default; we use keep-alive below).
+// v0.2+ multi-provider: provider config 走 useProviderConfig, agent settings
+// 走 laipe-vue useConfig (跟 provider 解耦).
 
-import { computed, onMounted, ref } from "vue";
-import type { ChatMessage, ProviderConfig, ToolDefinition } from "laipe-ts";
+import { computed, onMounted, ref, watch } from "vue";
+import type {
+  AssistantToolCall,
+  ChatMessage,
+  ProviderConfig,
+  ToolDefinition,
+  ChatErrorKind,
+} from "laipe-ts";
 import {
   ChatView,
+  MessageBubble,
   Sidebar,
+  ToolCallCard,
   useConfig,
   useConversations,
   useChat,
   tauriStream,
 } from "laipe-vue";
 import { TOOLS } from "../tools";
-import { cleanupModelId, findModel } from "../modelCatalog";
 import { useProviderConfig } from "../composables/useProviderConfig";
+import { useToolApprovals } from "../composables/useToolApprovals";
+import { getErrorMessage, type PlayerErrorMessage } from "../lib/error-messages";
+import type { EffortLevel } from "../lib/settings";
+import ModelEffortSelector from "../components/chat/ModelEffortSelector.vue";
 
-// v0.2+ multi-provider: provider config 走 useProviderConfig (PlotCraft 等价
-// multi-provider UX), agent settings 走 laipe-vue useConfig (跟 provider 解耦).
-// `cfg` 是 active provider 的 laipe ProviderConfig; 没 active provider 时 null.
-const { config: cfg, agentSettings } = useProviderConfig()
+const { config: cfg, agentSettings, providers, setActive } = useProviderConfig();
 const { conversations, currentId, current, create, select, remove, setMessages, clearAll } =
   useConversations()
+const { agentSettings: _agentSettings2, reset: _resetAgent } = useConfig()
+
+/** Chat 端 state: 当前选中的 model id + effort
+ *  - 默认从 active provider 的 defaultModel 开始
+ *  - 用户在 ModelEffortSelector 切 → 写这里 + useProviderConfig.setActive
+ */
+const selectedModel = ref<string>(cfg.value?.model ?? "");
+const selectedEffort = ref<EffortLevel>("none");
+
+// 跟随 active provider 切 → 同步 selectedModel
+watch(
+  () => cfg.value?.model,
+  (m) => {
+    if (m != null) selectedModel.value = m;
+  },
+);
+
+const unconfiguredProviderCount = computed(
+  () =>
+    providers.value.filter((p) => {
+      if (!p.enabled) return false;
+      const effective = p.defaultModel?.trim() || p.models?.[0]?.id?.trim() || "";
+      return effective === "";
+    }).length,
+);
+
+const effortSupported = computed(() => selectedModel.value.trim().length > 0);
+
+/** 玩家在 chat 端选 model → 反查 provider, 切 active connection */
+function onSelectModel(id: string) {
+  const cp = providers.value.find((p) => {
+    if (!p.enabled) return false;
+    const effective = p.defaultModel?.trim() || p.models?.[0]?.id?.trim() || "";
+    return effective === id;
+  });
+  if (cp) {
+    // v0.2+ Laipe: useProviderConfig.setActive 切 active provider
+    setActive(cp.id);
+  }
+  selectedModel.value = id;
+}
+
+function onSelectEffort(level: EffortLevel) {
+  selectedEffort.value = level;
+}
 
 /** Tools that are currently enabled in Settings (filtered from TOOLS). */
 const enabledToolsList = computed<ToolDefinition[]>(() =>
   TOOLS.filter((t) => agentSettings.value.enabledTools[t.function.name] ?? true),
 )
 
-// `tauriStream` invokes the Rust `chat` command; the filtered tool list
-// tells the LLM (and the Rust agent loop) which functions it may call.
-const { status, send, cancel } = useChat(tauriStream, () => enabledToolsList.value);
+const { status, lastError, lastErrorKind, send, cancel, clearError } = useChat(
+  tauriStream,
+  () => enabledToolsList.value,
+  () => agentSettings.value.toolPermissions,
+);
+
+const approvals = useToolApprovals();
 
 const toast = ref<string | null>(null);
 const sidebarOpen = ref(true);
@@ -55,23 +104,32 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 const messages = computed<ChatMessage[]>(() => current.value?.messages ?? []);
 
-/** Topbar model label: catalog name if found, else cleaned+truncated id. */
-const modelDisplay = computed<string>(() => {
-  const c = cfg.value;
-  if (!c) return "(no active provider)";
-  const m = findModel(c.model);
-  if (m) return m.name;
-  return cleanupModelId(c.model || "");
+/** v0.2+ 错误条 player 文案 (PlotCraft 镜像) */
+const errorMessage = computed<PlayerErrorMessage | null>(() => {
+  if (!lastError.value) return null;
+  return getErrorMessage(lastErrorKind.value as ChatErrorKind | null, lastError.value);
 });
 
-onMounted(() => {
-  if (!cfg.value?.api_key) {
-    setTimeout(
-      () => showToast("Add your API key in Settings to start chatting."),
-      800,
-    );
+/** Retry: 删最后一条 assistant 错误消息 + 重发最后一条 user message */
+async function onRetry() {
+  if (!errorMessage.value?.canRetry) return;
+  const lastUser = [...messages.value].reverse().find((m) => m.role === "user");
+  if (!lastUser) return;
+  // strip trailing error assistant messages
+  const next: ChatMessage[] = [];
+  for (const m of messages.value) {
+    if (m.role === "assistant" && m.content.startsWith("[") && m.content.includes("]")) {
+      // skip error-tagged assistant message
+      continue;
+    }
+    next.push(m);
   }
-});
+  setMessages(next);
+  clearError();
+  const c = cfg.value;
+  if (!c) return;
+  await send(c, next, currentId.value ?? undefined);
+}
 
 function showToast(msg: string, duration = 4000): void {
   toast.value = msg;
@@ -92,16 +150,23 @@ async function handleSend(text: string): Promise<void> {
     showToast("No API key configured. Open Settings to add one.");
     return;
   }
+  if (!selectedModel.value.trim()) {
+    showToast("No model selected. Pick one in the model selector below.");
+    return;
+  }
+  // 把 selectedModel / effort 应用到 effective config (不写回 useProviderConfig,
+  // 跟 PlotCraft 一致 — chat 端切 model 写回, effort 是 per-run 的)
+  const eff: ProviderConfig = {
+    ...c,
+    model: selectedModel.value,
+    effort: selectedEffort.value === "none" ? undefined : selectedEffort.value,
+  };
   const next: ChatMessage[] = [
     ...messages.value,
     { role: "user", content: text },
   ];
   setMessages(next);
-  // Propagate the active conversation id so the diagnostic recorder
-  // can group saved error reports by conversation. `currentId` may be
-  // null for the very first send before `useConversations` has
-  // assigned one; pass undefined to let the backend default.
-  await send(c, next, currentId.value ?? undefined);
+  await send(eff, next, currentId.value ?? undefined);
 }
 
 function handleCancel(): void {
@@ -121,9 +186,40 @@ function handleRemove(id: string): void {
 }
 
 function handleClearAll(): void {
-  if (!confirm("Delete all conversations? This cannot be undone.")) return;
-  clearAll();
+  if (confirm("Delete all conversations? This cannot be undone.")) clearAll();
 }
+
+function handleApprove(call: AssistantToolCall): void {
+  if (!call.id) return;
+  void approvals.approve(call.id);
+}
+
+function handleDeny(call: AssistantToolCall): void {
+  if (!call.id) return;
+  void approvals.deny(call.id);
+}
+
+onMounted(() => {
+  if (!cfg.value?.api_key) {
+    setTimeout(
+      () => showToast("Add your API key in Settings to start chatting."),
+      800,
+    );
+  }
+});
+
+watch(
+  () => messages.value,
+  (msgs) => {
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== "assistant") return;
+    for (const call of last.tool_calls ?? []) {
+      if (!call.id) continue;
+      approvals.track(call);
+    }
+  },
+  { deep: true },
+);
 </script>
 
 <template>
@@ -142,9 +238,6 @@ function handleClearAll(): void {
       <div class="title-area">
         <span class="logo">▰</span>
         <h1>{{ current?.title || "laipe" }}</h1>
-        <span v-if="cfg?.api_key" class="model-tag">
-          {{ modelDisplay }} · {{ cfg?.api_format }}{{ cfg?.effort ? ` · ${cfg.effort}` : "" }}
-        </span>
       </div>
       <div class="actions">
         <button
@@ -167,18 +260,83 @@ function handleClearAll(): void {
       @send="handleSend"
       @cancel="handleCancel"
       @update="(m: ChatMessage[]) => setMessages(m)"
-    />
+    >
+      <template #message="{ message, streaming }">
+        <MessageBubble :message="message" :streaming="streaming">
+          <template #tool-calls="{ calls }">
+            <ToolCallCard
+              v-for="call in calls"
+              :key="call.id"
+              :call="call"
+              :pending="streaming"
+              :on-approve="() => handleApprove(call)"
+              :on-deny="() => handleDeny(call)"
+            />
+          </template>
+        </MessageBubble>
+      </template>
+    </ChatView>
     <div v-else class="no-conversation">
       <div class="setup-card">
         <h2>Welcome to laipe</h2>
         <p>A desktop chat app built on <strong>laipe</strong> + Tauri 2.</p>
         <p class="muted">
-          Multi-conversation, settings page, streaming via Tauri IPC,
-          localStorage persistence. Single .exe, no browser required.
+          Multi-provider (PlotCraft 1:1 mirror), settings page, streaming
+          via Tauri IPC, localStorage persistence. Single .exe, no browser
+          required.
         </p>
         <button class="btn-primary" @click="handleNewChat">Start your first chat</button>
       </div>
     </div>
+
+    <!-- v0.2+ chat composer 顶部错误条 + ModelEffortSelector (PlotCraft 镜像) -->
+    <div v-if="current" class="composer-area">
+      <!-- 错误条 -->
+      <div v-if="errorMessage" class="error-bar" :class="{ retryable: errorMessage.canRetry }">
+        <div class="error-bar-main">
+          <div class="error-bar-title">{{ errorMessage.title }}</div>
+          <div class="error-bar-desc">{{ errorMessage.description }}</div>
+          <div class="error-bar-hint">{{ errorMessage.hint }}</div>
+        </div>
+        <div class="error-bar-actions">
+          <button
+            v-if="errorMessage.canRetry"
+            type="button"
+            class="btn-retry"
+            @click="onRetry"
+          >
+            ↻ Retry
+          </button>
+          <button
+            type="button"
+            class="btn-dismiss"
+            title="Dismiss"
+            @click="clearError"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      <!-- composer: model selector + 临时 input 显示 (real input 是 ChatView 的) -->
+      <div class="model-row">
+        <ModelEffortSelector
+          :selected-id="selectedModel"
+          :effort="selectedEffort"
+          :effort-supported="effortSupported"
+          :unconfigured-provider-count="unconfiguredProviderCount"
+          :disabled="status === 'streaming'"
+          @select-model="onSelectModel"
+          @select-effort="onSelectEffort"
+        />
+        <span v-if="!selectedModel.trim()" class="model-hint">
+          ⚠ 没选 model —— 点上面 selector
+        </span>
+      </div>
+    </div>
+
+    <!-- toast (top center) -->
+    <div v-if="toast" class="toast">{{ toast }}</div>
   </div>
 </template>
 
@@ -230,14 +388,6 @@ function handleClearAll(): void {
   margin: 0;
   font-size: 1.05em;
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.model-tag {
-  font-size: 0.75em;
-  color: #a1a1a6;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -300,5 +450,104 @@ function handleClearAll(): void {
   font-family: inherit;
 }
 .btn-primary:hover { background: #0066d6; }
-@media (max-width: 720px) { .model-tag { display: none; } }
+
+/* v0.2+ composer area (model selector + error bar) */
+.composer-area {
+  flex-shrink: 0;
+  border-top: 1px solid #e5e5e7;
+  background: #ffffff;
+}
+.error-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(255, 59, 48, 0.06);
+  border-bottom: 1px solid rgba(255, 59, 48, 0.2);
+}
+.error-bar.retryable {
+  background: rgba(255, 149, 0, 0.08);
+  border-bottom-color: rgba(255, 149, 0, 0.3);
+}
+.error-bar-main {
+  flex: 1;
+  min-width: 0;
+}
+.error-bar-title {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: #ff3b30;
+  margin-bottom: 2px;
+}
+.error-bar.retryable .error-bar-title {
+  color: #ff9500;
+}
+.error-bar-desc {
+  font-size: 0.78em;
+  color: #6e6e73;
+  margin-bottom: 2px;
+  line-height: 1.4;
+}
+.error-bar-hint {
+  font-size: 0.72em;
+  color: #6e6e73;
+  font-style: italic;
+  line-height: 1.4;
+}
+.error-bar-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.btn-retry,
+.btn-dismiss {
+  padding: 4px 10px;
+  font-size: 0.78em;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid #d2d2d7;
+}
+.btn-retry {
+  background: #007aff;
+  border-color: #007aff;
+  color: white;
+}
+.btn-retry:hover {
+  opacity: 0.85;
+}
+.btn-dismiss {
+  background: transparent;
+  color: #6e6e73;
+}
+.btn-dismiss:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+}
+.model-hint {
+  font-size: 0.75em;
+  color: #ff9500;
+  font-style: italic;
+}
+
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.85);
+  color: white;
+  border-radius: 6px;
+  font-size: 0.85em;
+  z-index: 200;
+}
 </style>

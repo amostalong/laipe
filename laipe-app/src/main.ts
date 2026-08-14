@@ -1,7 +1,7 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import "./style.css";
-import { initConsole, installConsoleHook } from "laipe-vue";
+import { initConsole, installConsoleHook, localStorageConfig, setConfigStorage, whenConfigReady } from "laipe-vue";
 import { router } from "./router";
 
 // Install the console hook BEFORE createApp so any logs from app
@@ -14,6 +14,15 @@ initConsole().catch((e: unknown) => {
   console.error("[main] initConsole failed:", e);
 });
 
+// Load the persisted provider/agent config (localStorage keys
+// `laipe.config.v1` / `laipe.agent.v1`) BEFORE mounting so the first
+// render already sees saved settings instead of defaults. Explicit
+// wiring even though useConfig now self-loads at module init — this
+// is the documented pattern for swapping in a custom storage later.
+setConfigStorage(localStorageConfig);
+
 const app = createApp(App);
 app.use(router);
-app.mount("#app");
+// Wait for the storage load (async adapter or not) so the first render
+// already sees the saved config instead of a flash of defaults.
+void whenConfigReady().then(() => app.mount("#app"));

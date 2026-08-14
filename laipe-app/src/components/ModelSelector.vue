@@ -79,12 +79,17 @@ const effortChipColor = computed<string | undefined>(() => {
   return EFFORT_OPTIONS.find((e) => e.value === props.effort)?.color;
 });
 
-/** When the format changes, if the current model isn't available, switch to the first one. */
+/**
+ * When the format changes, if the current model (in the catalog) doesn't
+ * support the new format, switch to the first available one. Custom models
+ * (not in the catalog, i.e. !m) are preserved — the player picked them
+ * explicitly and we shouldn't silently overwrite.
+ */
 watch(
   () => props.apiFormat,
   () => {
     const m = currentModel.value;
-    if (!m || !m.api_formats.includes(props.apiFormat)) {
+    if (m && !m.api_formats.includes(props.apiFormat)) {
       const fallback = availableModels.value[0];
       if (fallback) {
         emit("update:modelId", fallback.id);

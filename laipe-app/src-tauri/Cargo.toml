@@ -26,6 +26,10 @@ laipe-core = { path = "../../crates/laipe-core" }
 laipe-streaming = { path = "../../crates/laipe-streaming" }
 laipe-tokio = { path = "../../crates/laipe-tokio" }
 
+# HTTP client for model catalog refresh (laipe_streaming::model_catalog
+# accepts &reqwest::Client; the host builds one)
+reqwest = { workspace = true }
+
 # Workspace-shared deps
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }

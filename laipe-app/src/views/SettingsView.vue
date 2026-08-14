@@ -175,7 +175,9 @@ function setActive(cat: Category): void {
           key="tools"
           :tools="TOOLS"
           :enabled-tools="agentSettings.enabledTools"
+          :tool-permissions="agentSettings.toolPermissions"
           @update:enabled-tools="(next) => (agentSettings.enabledTools = next)"
+          @update:tool-permissions="(next) => (agentSettings.toolPermissions = next)"
         />
         <ConsolePanel
           v-else-if="activeCategory === 'console'"

@@ -78,8 +78,8 @@ const ANTHROPIC: ModelInfo[] = [
   {
     id: "claude-sonnet-4-5",
     name: "Claude Sonnet 4.5",
-    api_formats: ["anthropic"],
-    supported_efforts: ["low", "medium", "high"],
+    api_formats: ["anthropic_messages"],
+    supported_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
     default_effort: null,
     note: "Anthropic flagship · 200K context",
     context: 200_000,
@@ -87,7 +87,7 @@ const ANTHROPIC: ModelInfo[] = [
   {
     id: "claude-3-5-haiku-latest",
     name: "Claude 3.5 Haiku",
-    api_formats: ["anthropic"],
+    api_formats: ["anthropic_messages"],
     supported_efforts: [],
     default_effort: null,
     note: "Fast + cheap · 200K context",
@@ -96,7 +96,7 @@ const ANTHROPIC: ModelInfo[] = [
   {
     id: "claude-3-5-sonnet-latest",
     name: "Claude 3.5 Sonnet",
-    api_formats: ["anthropic"],
+    api_formats: ["anthropic_messages"],
     supported_efforts: [],
     default_effort: null,
     note: "Previous gen · 200K context",

@@ -16,6 +16,7 @@
 // capability. For the starter we keep it hard-coded to two demo tools.
 
 import type { ToolDefinition } from "laipe-ts";
+import { builtinTools } from "laipe-ts";
 
 /**
  * `get_current_time` — server-side UTC clock.
@@ -60,4 +61,13 @@ const ECHO: ToolDefinition = {
   },
 };
 
-export const TOOLS: ToolDefinition[] = [GET_CURRENT_TIME, ECHO];
+// Demo tools (laipe-app starter) + the 3 built-in canonical
+// patterns laipe ships in lib (see packages/laipe-ts/src/builtin-tools.ts
+// and crates/laipe-core/src/builtin_tools.rs). Apps would usually
+// disable some of the built-ins in production (e.g. update_doc_item
+// if your fork has no project documents to mutate).
+export const TOOLS: ToolDefinition[] = [
+  GET_CURRENT_TIME,
+  ECHO,
+  ...builtinTools(),
+];

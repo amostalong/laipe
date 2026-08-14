@@ -9,11 +9,11 @@
 //   - Trash 弹 Delete confirm modal (不用 window.confirm)
 // - 整张 card 点击 → setActive (切 active)
 //
-// v0.1 laipe-app 简化 (vs PlotCraft):
-// - 不接 Tauri models.dev catalog fetch (用静态 curated catalog, 8 model)
-// - 不做 "Import from Locus" 跨 app 导入
-// - 不做 "Test connection" 按钮 (laipe-ts testProvider 加好了, modal 留 hook 但 v0.1 不接)
-// - active 切换留在 card 上 (laipe-app 没 chat selector, 切 active 在 settings)
+// v0.2 laipe-app 简化 (vs PlotCraft):
+// - 不接 Tauri models.dev catalog fetch (useModelCatalog 提供, modal 内部用)
+// - 不做 "Import from Locus" 跨 app 导入 (laipe-app 是 Vue+Vite 浏览器 demo, 没 Tauri FS access)
+// - modal 2 阶段 (pick → config) — Pick stage 调 useModelCatalog 拉 catalog
+// - 字段 camelCase (baseUrl/apiKey/defaultModel) 跟 PlotCraft / useProviderConfig 对齐
 
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { useProviderConfig, type CustomProvider } from "../../composables/useProviderConfig";
@@ -29,40 +29,37 @@ const {
   toggleEnabled,
 } = useProviderConfig();
 
-// === Add / Edit modal state ===
+// === Add / Edit modal state (2-stage: pick → config) ===
 const editingProvider = ref<CustomProvider | null>(null);
 const isAdding = ref(false);
 const existingIds = computed(() => providers.value.map((p) => p.id));
 
-function startAdd(): void {
+function startAdd() {
   isAdding.value = true;
   editingProvider.value = {
     id: "",
     name: "",
-    endpoint: "https://",
-    api_key: "",
-    model: "",
-    api_format: "openai_chat",
+    baseUrl: "https://",
+    apiKey: "",
+    apiFormat: "openai_chat",
     enabled: true,
-    effort: null,
-    max_tokens: null,
-    temperature: null,
-    default_model: null,
     models: [],
+    defaultModel: "",
   };
 }
 
-function startEdit(p: CustomProvider): void {
+function startEdit(p: CustomProvider) {
   isAdding.value = false;
+  // 浅拷贝（modal 内会修改 draft，但 props.provider 是 readonly）
   editingProvider.value = { ...p };
 }
 
-function closeModal(): void {
+function closeModal() {
   editingProvider.value = null;
   isAdding.value = false;
 }
 
-function onModalSave(newProvider: CustomProvider): void {
+function onModalSave(newProvider: CustomProvider) {
   if (isAdding.value) {
     const created = add(newProvider);
     setActive(created.id);
@@ -81,13 +78,13 @@ const confirmingDeleteTarget = computed<CustomProvider | null>(() => {
   return providers.value.find((p) => p.id === id) ?? null;
 });
 
-function askDelete(id: string): void {
+function askDelete(id: string) {
   confirmingDeleteId.value = id;
 }
-function cancelDelete(): void {
+function cancelDelete() {
   confirmingDeleteId.value = null;
 }
-function confirmDelete(): void {
+function confirmDelete() {
   const id = confirmingDeleteId.value;
   if (!id) return;
   remove(id);
@@ -96,10 +93,14 @@ function confirmDelete(): void {
 
 function formatLabel(fmt: string): string {
   switch (fmt) {
-    case "openai_chat": return "OpenAI Chat Completions";
-    case "openai_responses": return "OpenAI Responses";
-    case "anthropic": return "Anthropic Messages";
-    default: return fmt;
+    case "openai_chat":
+      return "OpenAI Chat Completions";
+    case "openai_responses":
+      return "OpenAI Responses";
+    case "anthropic_messages":
+      return "Anthropic Messages";
+    default:
+      return fmt;
   }
 }
 
@@ -117,7 +118,7 @@ function maskKey(k: string): string {
 }
 
 // Esc 关 delete modal
-function onKeydown(e: KeyboardEvent): void {
+function onKeydown(e: KeyboardEvent) {
   if (e.key === "Escape" && confirmingDeleteId.value) cancelDelete();
 }
 onMounted(() => document.addEventListener("keydown", onKeydown));
@@ -210,24 +211,24 @@ onUnmounted(() => document.removeEventListener("keydown", onKeydown));
           </div>
         </div>
         <div class="card-body">
-          <div class="endpoint-badge">{{ shortEndpoint(p.endpoint) }}</div>
+          <div class="endpoint-badge">{{ shortEndpoint(p.baseUrl) }}</div>
           <div class="card-row">
             <span class="card-label">format:</span>
-            <span class="card-val">{{ formatLabel(p.api_format) }}</span>
+            <span class="card-val">{{ formatLabel(p.apiFormat) }}</span>
           </div>
           <div class="card-row">
             <span class="card-label">apiKey:</span>
-            <code class="card-val">{{ maskKey(p.api_key) }}</code>
+            <code class="card-val">{{ maskKey(p.apiKey) }}</code>
           </div>
           <div class="card-row">
             <span class="card-label">model:</span>
-            <code class="card-val">{{ p.model || "(no model)" }}</code>
+            <code class="card-val">{{ p.defaultModel || p.models[0]?.id || "(no model)" }}</code>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Edit / Add Modal -->
+    <!-- Edit / Add Modal (2 阶段: pick → config) -->
     <ProviderEditModal
       :provider="editingProvider"
       :is-new="isAdding"
